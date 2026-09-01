@@ -17,8 +17,12 @@ class E06ResidualMultiScaleDetGeo(nn.Module):
     original 9x5 detector path in evaluation mode.
     """
 
-    def __init__(self, emb_size=512, leaky=True, freeze_baseline=True):
+    def __init__(self, emb_size=512, leaky=True, freeze_baseline=True,
+                 fusion_mode="parallel"):
         super().__init__()
+        if fusion_mode not in ("parallel", "sequential"):
+            raise ValueError("fusion_mode must be parallel or sequential")
+        self.fusion_mode = fusion_mode
         use_instnorm = False
 
         # Frozen DetGeo baseline: retain names and operations for checkpoint
@@ -46,14 +50,32 @@ class E06ResidualMultiScaleDetGeo(nn.Module):
             1024, emb_size, 1, 1, 0, 1, leaky=leaky, instance=use_instnorm)
         self.fine_projection = ConvBatchNormReLU(
             256, emb_size, 1, 1, 0, 1, leaky=leaky, instance=use_instnorm)
-        self.residual_adapter = nn.Sequential(
-            ConvBatchNormReLU(emb_size * 3, emb_size, 3, 1, 1, 1,
-                              leaky=leaky, instance=use_instnorm),
-            ConvBatchNormReLU(emb_size, emb_size, 3, 1, 1, 1,
-                              leaky=leaky, instance=use_instnorm),
-            nn.Conv2d(emb_size, emb_size, kernel_size=1),
-        )
-        self.residual_scale = nn.Parameter(torch.zeros(1))
+        if fusion_mode == "parallel":
+            self.residual_adapter = nn.Sequential(
+                ConvBatchNormReLU(emb_size * 3, emb_size, 3, 1, 1, 1,
+                                  leaky=leaky, instance=use_instnorm),
+                ConvBatchNormReLU(emb_size, emb_size, 3, 1, 1, 1,
+                                  leaky=leaky, instance=use_instnorm),
+                nn.Conv2d(emb_size, emb_size, kernel_size=1),
+            )
+            self.residual_scale = nn.Parameter(torch.zeros(1))
+        else:
+            # Coarse evidence first changes an intermediate 64x64 feature;
+            # fine evidence then conditions the final residual.  Both scales
+            # begin at zero, so this branch cannot alter frozen DetGeo at
+            # initialization.
+            self.coarse_adapter = nn.Sequential(
+                ConvBatchNormReLU(emb_size * 2, emb_size, 3, 1, 1, 1,
+                                  leaky=leaky, instance=use_instnorm),
+                nn.Conv2d(emb_size, emb_size, kernel_size=1),
+            )
+            self.fine_adapter = nn.Sequential(
+                ConvBatchNormReLU(emb_size * 2, emb_size, 3, 1, 1, 1,
+                                  leaky=leaky, instance=use_instnorm),
+                nn.Conv2d(emb_size, emb_size, kernel_size=1),
+            )
+            self.coarse_scale = nn.Parameter(torch.zeros(1))
+            self.fine_scale = nn.Parameter(torch.zeros(1))
         self._baseline_frozen = False
         self.freeze_baseline(freeze_baseline)
 
@@ -92,6 +114,14 @@ class E06ResidualMultiScaleDetGeo(nn.Module):
         fused_64, attention_64 = self.crossview_fusionmodule(query_vector, reference_64)
         return query_vector, reference_raw, fused_64, attention_64.squeeze(1)
 
+    def residual_scales(self):
+        if self.fusion_mode == "parallel":
+            return {"parallel_alpha": float(self.residual_scale.detach())}
+        return {
+            "coarse_alpha": float(self.coarse_scale.detach()),
+            "fine_alpha": float(self.fine_scale.detach()),
+        }
+
     def forward(self, query_imgs, reference_imgs, mat_clickptns, return_features=False):
         if self._baseline_frozen:
             with torch.no_grad():
@@ -107,9 +137,16 @@ class E06ResidualMultiScaleDetGeo(nn.Module):
         fine_64 = F.adaptive_avg_pool2d(self.fine_projection(reference_raw[2]), spatial_size)
         coarse_context, _ = self.crossview_fusionmodule(query_vector, coarse_64)
         fine_context, _ = self.crossview_fusionmodule(query_vector, fine_64)
-        residual = self.residual_adapter(torch.cat(
-            (fused_64, coarse_context, fine_context), dim=1))
-        fused_final = fused_64 + self.residual_scale * residual
+        if self.fusion_mode == "parallel":
+            residual = self.residual_adapter(torch.cat(
+                (fused_64, coarse_context, fine_context), dim=1))
+            fused_final = fused_64 + self.residual_scale * residual
+        else:
+            coarse_delta = self.coarse_adapter(torch.cat((fused_64, coarse_context), dim=1))
+            coarse_enhanced = fused_64 + self.coarse_scale * coarse_delta
+            fine_delta = self.fine_adapter(torch.cat((coarse_enhanced, fine_context), dim=1))
+            residual = fine_delta
+            fused_final = fused_64 + self.fine_scale * fine_delta
         output = self.fcn_out(fused_final)
         if return_features:
             return output, attention_64, fused_64, residual, fused_final

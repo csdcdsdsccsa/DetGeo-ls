@@ -426,3 +426,66 @@ logs/e06_parallel_multiscale_3e_v1.log
 Generated logs, outputs, and checkpoints remain excluded from Git.
 
 **Conclusion:** The baseline-preserving mechanism works exactly and avoids E05's destructive head replacement, but this first parallel multi-scale adapter does not exceed DetGeo in three epochs. Do not claim a gain or extend this configuration to 20 epochs. The next controlled question, if pursued, is a sequential coarse-to-fine residual adapter using the same frozen head, zero-init equality guard, checkpoint, split, budget, and metrics; it must be compared directly against this E06 parallel result.
+
+## E06-C — Baseline-preserving sequential multi-scale residual adapter
+
+**Date:** 2026-09-01
+
+**Git base:** `1a46d42`
+
+**Goal:** Directly compare sequential coarse-to-fine residual fusion against E06's completed parallel fusion. Keep the DetGeo checkpoint, frozen 9-anchor head, data splits, optimizer, seed, 3-epoch budget, and zero-init equality gate unchanged; change only residual fusion order.
+
+**Changed files**
+
+- `model/e06_geo.py`: adds `fusion_mode=sequential`: a query-conditioned 32->64 residual first enhances an intermediate feature, then a query-conditioned 128->64 branch predicts the final residual. Both scales initialize at zero.
+- `train_e06.py`: adds `--fusion-mode` and records one or two residual scales consistently.
+- `EXPERIMENTS.md`: this completed comparison record.
+
+**Dataset and split**
+
+- Dataset: `CVOGL_DroneAerial`; train / validation: 4,343 / 923 samples
+- Model selection: best validation `Acc@0.5`
+- Test split used: **no**
+
+**Checkpoint and zero-init guard**
+
+- Base checkpoint: `saved_models/model_droneaerial_bs8_model_best.pth.tar`
+- Loaded DetGeo tensors: `584/584`; trainable E06-C parameters: `10,621,954`
+- All `923/923` validation samples had bitwise-identical 45-channel logits to frozen DetGeo at initialization; maximum absolute difference: `0.0`.
+
+**Exact command**
+
+```bash
+PYTHONPATH=. /root/miniconda3/envs/detgeo/bin/python train_e06.py \
+  --gpu 0 --data-root data --data-name CVOGL_DroneAerial \
+  --checkpoint saved_models/model_droneaerial_bs8_model_best.pth.tar \
+  --output-dir outputs/e06_sequential_multiscale_3e_v1 \
+  --fusion-mode sequential --epochs 3 --batch-size 4 --num-workers 8 \
+  --lr 1e-4 --seed 13
+```
+
+**Validation results**
+
+| Variant | Best epoch | Acc@0.25 | Acc@0.5 | Mean IoU | Center accuracy |
+|---|---:|---:|---:|---:|---:|
+| Original DetGeo | 0 | 60.78% | 56.01% | — | — |
+| E06 parallel residual | 2 | 60.46% | 55.58% | 44.54% | 25.57% |
+| E06-C sequential residual | **1** | **61.11%** | **56.34%** | **45.01%** | 24.38% |
+
+The sequential run's later epochs were 55.58% and 55.15% Acc@0.5, so `model_best.pth.tar` correctly preserves epoch 1.
+
+Best-result comparison at IoU 0.5:
+
+- E06-C vs DetGeo: `56.34 - 56.01 = +0.33` percentage points (`520/923` vs. `517/923`, +3 samples).
+- E06-C vs E06 parallel: `56.34 - 55.58 = +0.76` percentage points (+7 samples).
+
+**Artifacts on the experiment server**
+
+```text
+outputs/e06_sequential_multiscale_3e_v1/{config.json,zero_init.json,zero_init_per_sample.jsonl,history.json,model_best.pth.tar}
+logs/e06_sequential_multiscale_3e_v1.log
+```
+
+Generated logs, outputs, and checkpoints remain excluded from Git.
+
+**Conclusion:** Keep E06-C as the first verified improvement: it preserves the detector exactly at initialization and provides a small validation-only gain over DetGeo. The improvement is three samples and degrades after the first epoch, so do not touch the test split or claim generalization. The next action is validation-only robustness work (for example, a second seed) before selecting any test-set checkpoint or adding further modules.

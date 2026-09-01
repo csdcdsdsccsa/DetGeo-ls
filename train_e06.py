@@ -36,6 +36,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--beta", type=float, default=1.0)
+    parser.add_argument("--fusion-mode", choices=("parallel", "sequential"), default="parallel")
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--print-freq", type=int, default=100)
     return parser.parse_args()
@@ -134,9 +135,9 @@ def run_epoch(model, loader, anchors, args, device, optimizer=None, epoch=0):
         for key in ("correct_050", "correct_025", "center_correct", "iou_sum"):
             totals[key] += batch_metrics[key]
         if index % args.print_freq == 0 or index == len(loader):
-            print("%s epoch=%d %d/%d loss=%.4f alpha=%.6f" % (
+            print("%s epoch=%d %d/%d loss=%.4f scales=%s" % (
                 "train" if training else "val", epoch, index, len(loader), float(loss.detach()),
-                float(model.module.residual_scale.detach())), flush=True)
+                model.module.residual_scales()), flush=True)
     return summarize(totals)
 
 
@@ -163,7 +164,7 @@ def verify_zero_init(model, checkpoint, loader, args, device, output_dir):
                 handle.write(json.dumps({"sample_id": int(sample_id), "logits_equal": bool(equal)}) + "\n")
     result = {"sample_count": sample_count, "logits_equal_samples": equal_logit_samples,
               "max_abs_logit_difference": maximum_error,
-              "residual_scale": float(model.module.residual_scale.detach())}
+              "residual_scales": model.module.residual_scales()}
     if equal_logit_samples != sample_count or maximum_error != 0.0:
         raise RuntimeError("E06 initialization does not exactly reproduce DetGeo: %s" % result)
     return result
@@ -182,7 +183,8 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     train_loader = make_loader(args, "train", True)
     val_loader = make_loader(args, "val", False)
-    model = torch.nn.DataParallel(E06ResidualMultiScaleDetGeo(freeze_baseline=True)).to(device)
+    model = torch.nn.DataParallel(E06ResidualMultiScaleDetGeo(
+        freeze_baseline=True, fusion_mode=args.fusion_mode)).to(device)
     checkpoint, loaded, source_count = load_matching(model, args.checkpoint)
     model.module.freeze_baseline(True)
     config = vars(args).copy()
@@ -203,7 +205,7 @@ def main():
         with torch.no_grad():
             val_metrics = run_epoch(model, val_loader, anchors, args, device, None, epoch)
         record = {"epoch": epoch, "train": train_metrics, "val": val_metrics,
-                  "residual_scale": float(model.module.residual_scale.detach())}
+                  "residual_scales": model.module.residual_scales()}
         history.append(record)
         (output_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
         print(json.dumps(record, indent=2), flush=True)
