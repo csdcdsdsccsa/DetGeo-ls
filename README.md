@@ -1,7 +1,5 @@
 # Cross-view Object Geo-localization in a Local Region with Satellite Imagery
 
-> Project collaboration state: see [EXPERIMENTS.md](EXPERIMENTS.md) for reproducible ranking configurations, commands, results, and conclusions. Repository workflow rules are in [AGENTS.md](AGENTS.md).
-
 ### Abstract
 Cross-view geo-localization is a critical task in various applications, such as smart city management and disaster monitoring. Current methods typically divide a satellite image into patches and use these patches to identify the geographic location of a query image. However, these methods can only provide the location of an image rather than the location of a specific object of interest. This makes it difficult to link these methods to GeoDatabases to obtain detailed information about a target object, such as its name and construction time. To overcome this limitation, we propose a novel problem of cross-view object geo-localization in a local region with high-resolution satellite images. This problem includes two main challenges: accurately identifying the location of an object and distinguishing the target object from others in satellite images. To address these challenges, we present a new Detection-based Geo-localization method called DetGeo, which consists of an object detection-based framework with a two-branch encoder and a query-aware cross-view fusion module. DetGeo uses cross-view images as input to the detector to provide object-level geo-localization. The fusion module employs cross-view spatial attention to focus on relevant areas of target objects during cross-view feature fusion. To evaluate our method, we constructed a new Cross-View Object Geo-Localization dataset called CVOGL, which comprises ground-view or drone-view images as query images and satellite-view images as geo-tagged reference images. Comprehensive experiments are conducted to demonstrate the effectiveness of our method on CVOGL.
 
@@ -41,5 +39,6 @@ sh run_test_all.sh
   doi={10.1109/TGRS.2023.3307508}
 }
 ```
+
 
 

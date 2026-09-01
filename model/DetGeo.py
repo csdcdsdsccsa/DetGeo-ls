@@ -81,7 +81,7 @@ class DetGeo(nn.Module):
                 ConvBatchNormReLU(emb_size, emb_size//2, 1, 1, 0, 1, leaky=leaky, instance=use_instnorm),
                 nn.Conv2d(emb_size//2, 9*5, kernel_size=1))
 
-    def forward(self, query_imgs, reference_imgs, mat_clickptns, return_features=False):
+    def forward(self, query_imgs, reference_imgs, mat_clickptns):
         mat_clickptns = mat_clickptns.unsqueeze(1)
         
         query_imgs = self.combine_clickptns_conv( torch.cat((query_imgs, mat_clickptns), dim=1) )
@@ -103,6 +103,4 @@ class DetGeo(nn.Module):
 
         outbox = self.fcn_out(fused_features)
 
-        if return_features:
-            return outbox, attn_score, query_fvisu, reference_fvisu, fused_features
         return outbox, attn_score
