@@ -291,3 +291,71 @@ logs/oacfr_e05_coarse_to_fine_3e.log
 Generated logs, outputs, and checkpoints remain excluded from Git.
 
 **Conclusion:** Reject this E05 coarse-to-fine formulation as an improvement over DetGeo. The 64-only anchor-free replacement does not reproduce the original detector, and adding 32->64->128 propagation loses another 0.87 percentage points. Do not add E06-E09 complexity on top of this result yet. The next controlled question should first recover the baseline with a truly head-preserving multi-scale adapter or residual detector head, then test whether coarse-to-fine features add value without discarding DetGeo's trained 9-anchor head.
+
+## E05-D — Anchor-free checkpoint decode diagnostic
+
+**Date:** 2026-09-01
+
+**Git base:** `75607c8` (E05 checkpoint); diagnostic code added in this commit.
+
+**Goal:** Diagnose the completed E05-B/E05-C checkpoints without training or changing their weights. Separate the effect of default `Center x Quality` ranking, center-only ranking, and LTRB box decoding at the ground-truth center grid cell.
+
+**Changed files**
+
+- `scripts/analyze_oacfr_e05_decode.py`: reproducible validation-only decoder diagnostic, including a repository-root import fix for uninstalled checkouts.
+- `EXPERIMENTS.md`: this completed diagnostic record.
+
+**Dataset and split**
+
+- Dataset: `CVOGL_DroneAerial`
+- Split: validation, 923 samples
+- Test split used: **no**
+
+**Checkpoints**
+
+- E05-B: `outputs/oacfr_e05/64_only_3e/model_best.pth.tar`
+- E05-C: `outputs/oacfr_e05/coarse_to_fine_3e/model_best.pth.tar`
+
+**Exact commands**
+
+```bash
+PYTHONPATH=. /root/miniconda3/envs/detgeo/bin/python \
+  scripts/analyze_oacfr_e05_decode.py \
+  --gpu 0 --data-root data --data-name CVOGL_DroneAerial \
+  --checkpoint outputs/oacfr_e05/64_only_3e/model_best.pth.tar \
+  --output-dir outputs/oacfr_e05/decode_diag_64_only_best_v3 \
+  --search-scales 64
+
+PYTHONPATH=. /root/miniconda3/envs/detgeo/bin/python \
+  scripts/analyze_oacfr_e05_decode.py \
+  --gpu 0 --data-root data --data-name CVOGL_DroneAerial \
+  --checkpoint outputs/oacfr_e05/coarse_to_fine_3e/model_best.pth.tar \
+  --output-dir outputs/oacfr_e05/decode_diag_coarse_to_fine_best_v3 \
+  --search-scales 32,64,128
+```
+
+`oracle_center` is a diagnostic only: it selects the target center grid cell but still uses the model's predicted LTRB distances. It is not a deployable result.
+
+| Variant | Decode mode | Acc@0.25 | Acc@0.5 | Mean IoU | Exact center | Mean center error |
+|---|---|---:|---:|---:|---:|---:|
+| E05-B 64-only | Center x Quality | 56.99% | 51.35% | 41.83% | 23.62% | 174.7 px |
+| E05-B 64-only | Center only | 57.42% | 51.35% | 42.05% | 23.62% | 171.0 px |
+| E05-B 64-only | Oracle center | 97.83% | **88.52%** | 71.74% | 100.00% | 6.1 px |
+| E05-C 32->64->128 | Center x Quality | 56.45% | 50.49% | 39.47% | 12.46% | 172.8 px |
+| E05-C 32->64->128 | Center only | 56.12% | 49.95% | 39.05% | 11.48% | 175.1 px |
+| E05-C 32->64->128 | Oracle center | 96.32% | **84.07%** | 68.13% | 100.00% | 3.1 px |
+
+Additional center tolerance evidence: E05-B `Center x Quality` is only 20.48% / 41.28% / 52.55% within 8 / 16 / 32 pixels; E05-C is 26.54% / 41.60% / 52.87%. Selected Quality is poorly calibrated against final IoU (mean absolute error 0.365 for E05-B and 0.360 for E05-C), but removing it does not improve E05-B Acc@0.5 and reduces E05-C by five samples. It is not the primary failure mode.
+
+**Artifacts on the experiment server**
+
+```text
+outputs/oacfr_e05/decode_diag_64_only_best_v3/{config.json,summary.json,per_sample.jsonl}
+outputs/oacfr_e05/decode_diag_coarse_to_fine_best_v3/{config.json,summary.json,per_sample.jsonl}
+logs/e05_decode_64_only_v3.log
+logs/e05_decode_coarse_to_fine_v3.log
+```
+
+Generated artifacts remain excluded from Git.
+
+**Conclusion:** The E05 anchor-free LTRB regression is strong at the correct center, while center selection is the dominant failure: correcting only the center changes E05-B from 474/923 to 817/923 validation hits at IoU > 0.5, and E05-C from 466/923 to 776/923. The 32->64->128 formulation is worse than 64-only both in deployable accuracy and oracle-center box quality. Do not spend a 20-epoch budget on E05. E06 should preserve the trained DetGeo 9-anchor detection head exactly at initialization, add a zero-initialized residual multi-scale adapter to its 64x64 feature, and require epoch-0 per-sample decode equality with the frozen DetGeo baseline before training.

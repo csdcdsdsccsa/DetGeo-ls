@@ -11,9 +11,16 @@ JSONL so the selection and regression errors remain separately inspectable.
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 import torch
+
+# A script launched as ``python scripts/...`` otherwise only has ``scripts/``
+# on sys.path.  Make the repository imports work from an uninstalled checkout.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from model.oacfr_geo import OACFRGeoE05
 from model.oacfr_loss import aligned_iou, decode_ltrb_at_indices
