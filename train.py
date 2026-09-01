@@ -45,6 +45,10 @@ def main():
     parser.add_argument('--beta', default=1.0, type=float, help='the weight of cls loss')
     parser.add_argument('--detector_head', default='yolo', choices=['yolo', 'smgeo'],
                         help='detection head: legacy YOLO anchors or SMGeo anchor-free heatmap')
+    parser.add_argument('--freeze_backbone', action='store_true',
+                        help='freeze every shared DetGeo module and train only fcn_out')
+    parser.add_argument('--skip_detector_head', action='store_true',
+                        help='when loading --pretrain, do not load fcn_out weights')
     parser.add_argument('--test', dest='test', default=False, action='store_true', help='test')
     parser.add_argument('--val', dest='val', default=False, action='store_true', help='val')
     
@@ -118,11 +122,28 @@ def main():
 
     if args.pretrain:
         model = load_pretrain(model, args, logging)
+
+    if args.freeze_backbone:
+        frozen_params = 0
+        trainable_params = 0
+        for name, parameter in model.named_parameters():
+            parameter.requires_grad = name.startswith('fcn_out.')
+            if parameter.requires_grad:
+                trainable_params += parameter.numel()
+            else:
+                frozen_params += parameter.numel()
+        print('Frozen shared-backbone parameters: {}; trainable head parameters: {}'.format(
+            frozen_params, trainable_params))
+        logging.info('Frozen shared-backbone parameters: %d; trainable head parameters: %d',
+                     frozen_params, trainable_params)
     
     print('Num of parameters:', sum([param.nelement() for param in model.parameters()]))
     logging.info('Num of parameters:%d'%int(sum([param.nelement() for param in model.parameters()])))
 
-    optimizer = torch.optim.RMSprop([{'params': model.parameters()},], lr=args.lr, weight_decay=0.0005)
+    optimizer = torch.optim.RMSprop(
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lr=args.lr, weight_decay=0.0005
+    )
     
     ## training and testing
     best_accu = -float('Inf')
@@ -160,6 +181,11 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
     avg_iou = AverageMeter()
 
     model.train()
+    if args.freeze_backbone:
+        # train() would otherwise update BatchNorm running statistics in frozen modules.
+        for name, module in model.named_modules():
+            if name and not name.startswith('fcn_out.'):
+                module.eval()
     end = time.time()
     if args.detector_head == 'yolo':
         anchors_full = np.array([float(x.strip()) for x in args.anchors.split(',')])

@@ -38,6 +38,7 @@ def load_pretrain(model, args, logging):
         pretrained_dict = {
             k: v for k, v in pretrained_dict.items()
             if k in model_dict and v.shape == model_dict[k].shape
+            and not (getattr(args, 'skip_detector_head', False) and k.startswith('fcn_out.'))
         }
         assert (len([k for k, v in pretrained_dict.items()])!=0)
         model_dict.update(pretrained_dict)

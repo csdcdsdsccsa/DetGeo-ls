@@ -39,6 +39,8 @@ sh scripts/run_train_droneaerial.sh        # YOLO baseline: model_droneaerial_yo
 sh scripts/run_train_droneaerial_smgeo.sh  # SMGeo head: model_droneaerial_smgeo_bs8
 ```
 
+These scripts load the same DetGeo checkpoint, skip its legacy output head, freeze the shared backbone (including BatchNorm statistics), and optimize only `fcn_out`. Both runs use one GPU, batch size 8, seed 13, and 25 epochs.
+
 Then evaluate each model with its matching test script:
 
 ```
@@ -59,5 +61,4 @@ The original `model_droneaerial_bs8_model_best.pth.tar` is a YOLO-head checkpoin
   doi={10.1109/TGRS.2023.3307508}
 }
 ```
-
 
