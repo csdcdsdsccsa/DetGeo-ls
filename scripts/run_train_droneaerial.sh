@@ -1,0 +1,1 @@
+python train.py --detector_head yolo --emb_size 512 --img_size 1024 --max_epoch 25 --data_root data --data_name CVOGL_DroneAerial --beta 1.0 --savename model_droneaerial_yolo_bs8 --gpu 0 --batch_size 8 --num_workers 8 --print_freq 50 > logs/train_droneaerial_yolo_bs8.log 2>&1

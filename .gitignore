@@ -1,0 +1,11 @@
+# Runtime data and experiment artifacts are intentionally not versioned.
+data/
+saved_models/
+logs/
+results_map/
+
+# Python and local tooling artifacts.
+__pycache__/
+*.py[cod]
+.smgeo_reference/
+.vscode/
