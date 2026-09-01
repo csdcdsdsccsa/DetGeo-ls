@@ -359,3 +359,70 @@ logs/e05_decode_coarse_to_fine_v3.log
 Generated artifacts remain excluded from Git.
 
 **Conclusion:** The E05 anchor-free LTRB regression is strong at the correct center, while center selection is the dominant failure: correcting only the center changes E05-B from 474/923 to 817/923 validation hits at IoU > 0.5, and E05-C from 466/923 to 776/923. The 32->64->128 formulation is worse than 64-only both in deployable accuracy and oracle-center box quality. Do not spend a 20-epoch budget on E05. E06 should preserve the trained DetGeo 9-anchor detection head exactly at initialization, add a zero-initialized residual multi-scale adapter to its 64x64 feature, and require epoch-0 per-sample decode equality with the frozen DetGeo baseline before training.
+
+## E06 — Baseline-preserving parallel multi-scale residual adapter
+
+**Date:** 2026-09-01
+
+**Git base:** `0a6ffbd`
+
+**Goal:** Test the first head-preserving E06 formulation indicated by E05-D. Keep the trained DetGeo 64x64, 9-anchor detector head frozen; add only a parallel 32/64/128 reference-feature residual adapter. The experiment is invalid unless epoch-0 logits exactly equal the original DetGeo for every validation sample.
+
+**Changed files**
+
+- `model/e06_geo.py`: frozen DetGeo-compatible baseline path plus 32->64 and 128->64 projected query-aware contexts, fused through `F_final = F_base + alpha * DeltaF` with `alpha=0` at initialization.
+- `train_e06.py`: deterministic E06 train/validation entry point, checkpoint loading, full-validation zero-init equality guard, and artifact logging.
+- `EXPERIMENTS.md`: this completed experiment record.
+
+**Dataset and split**
+
+- Dataset: `CVOGL_DroneAerial`
+- Train / validation: 4,343 / 923 samples
+- Model selection: best validation `Acc@0.5`
+- Test split used: **no**
+
+**Checkpoint and initialization**
+
+- Base checkpoint: `saved_models/model_droneaerial_bs8_model_best.pth.tar`
+- Loaded DetGeo tensors: `584/584`
+- Frozen components: query backbone, reference Darknet, click preprocessing, original 64x64 mappings, cross-view path, and original 9-anchor `fcn_out`.
+- Trainable E06 parameters: `10,359,297`
+- Zero-init guard: `923/923` validation samples had bitwise-identical 45-channel logits; maximum absolute difference: `0.0`.
+
+**Configuration and command**
+
+- Parallel residual inputs: query-conditioned 32x32 and 128x128 reference contexts, resized to 64x64 and concatenated with the original 64x64 fused feature.
+- Residual scale `alpha`: learnable, initialized to `0`.
+- Epochs / batch size: `3` / `4`
+- Optimizer: AdamW, learning rate / weight decay: `1e-4` / `1e-4`
+- Seed / image size: `13` / `1024`
+
+```bash
+PYTHONPATH=. /root/miniconda3/envs/detgeo/bin/python train_e06.py \
+  --gpu 0 --data-root data --data-name CVOGL_DroneAerial \
+  --checkpoint saved_models/model_droneaerial_bs8_model_best.pth.tar \
+  --output-dir outputs/e06_parallel_multiscale_3e_v1 \
+  --epochs 3 --batch-size 4 --num-workers 8 --lr 1e-4 --seed 13
+```
+
+**Validation results**
+
+| Variant | Epoch | Acc@0.25 | Acc@0.5 | Mean IoU | Center accuracy | Residual alpha |
+|---|---:|---:|---:|---:|---:|---:|
+| Original DetGeo | 0 | **60.78%** | **56.01%** | — | — | — |
+| E06 parallel residual | 1 | 60.35% | 55.15% | 44.26% | 25.14% | -0.002374 |
+| E06 parallel residual | **2** | **60.46%** | **55.58%** | **44.54%** | **25.57%** | -0.002631 |
+| E06 parallel residual | 3 | 60.13% | 55.58% | 44.30% | 25.14% | -0.001930 |
+
+Best-result comparison at IoU 0.5: `55.58 - 56.01 = -0.43` percentage points, or four fewer correct validation samples (`513/923` vs. the recorded DetGeo baseline).
+
+**Artifacts on the experiment server**
+
+```text
+outputs/e06_parallel_multiscale_3e_v1/{config.json,zero_init.json,zero_init_per_sample.jsonl,history.json,model_best.pth.tar}
+logs/e06_parallel_multiscale_3e_v1.log
+```
+
+Generated logs, outputs, and checkpoints remain excluded from Git.
+
+**Conclusion:** The baseline-preserving mechanism works exactly and avoids E05's destructive head replacement, but this first parallel multi-scale adapter does not exceed DetGeo in three epochs. Do not claim a gain or extend this configuration to 20 epochs. The next controlled question, if pursued, is a sequential coarse-to-fine residual adapter using the same frozen head, zero-init equality guard, checkpoint, split, budget, and metrics; it must be compared directly against this E06 parallel result.
