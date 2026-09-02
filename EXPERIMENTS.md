@@ -58,9 +58,11 @@
 - Outputs are isolated as `scratch10_square_seed13` and
   `scratch10_sam_gaussian_seed13`; no test evaluation is used to choose either
   checkpoint.
-- Checkpoint selection: Square and SAM-Gaussian best validation Acc@0.50 were
-  46.59% and 52.76%, respectively. Each corresponding selected checkpoint was
-  then evaluated exactly once on test after explicit authorization.
+- Checkpoint selection: independent validation of the selected Square checkpoint
+  scored Acc@0.50/Acc@0.25/Mean IoU/Center Accuracy =
+  46.59%/54.06%/37.76%/21.13%; the selected SAM-Gaussian checkpoint scored
+  52.76%/59.48%/41.45%/19.72%. Each corresponding selected checkpoint was then
+  evaluated exactly once on test after explicit authorization.
 - Final test: Square scored Acc@0.50/Acc@0.25/Mean IoU/Center Accuracy =
   48.30%/53.75%/38.15%/24.97%. SAM-Gaussian scored
   56.22%/61.77%/43.88%/26.52%, a +7.92/+8.02/+5.73/+1.55 percentage-point change.
