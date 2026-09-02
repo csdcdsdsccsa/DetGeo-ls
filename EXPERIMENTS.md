@@ -83,3 +83,10 @@
 - Final test (one evaluation per validation-selected checkpoint): Square scored
   54.98%/59.51%/43.77%/29.80%; SAM-Gaussian scored
   60.74%/64.95%/48.37%/30.63%, a +5.76/+5.44/+4.60/+0.83 percentage-point change.
+
+## P05: one-epoch worker-count reproduction probe
+
+- Square-only diagnostic with the unchanged non-SAM path, no task checkpoint,
+  seed 13, batch size 8, learning rate `1e-4`, and `num_workers=8` to match the
+  original 25-epoch run. It runs exactly one epoch and is compared to the
+  original epoch-0 log; it is not a new performance result.
