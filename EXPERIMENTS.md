@@ -30,3 +30,14 @@
   10-epoch budget, original YOLO head/loss/decode, and validation protocol.
 - Learning rates: pretrained DetGeo parameters use `1e-5`; newly initialized
   `prompt_fusion` uses `1e-4`. Test data is excluded.
+- Square control result: completed 10 epochs. Best validation
+  Acc@0.50/Acc@0.25/Mean IoU/Center Accuracy =
+  54.93%/60.13%/44.27%/23.84%.
+- SAM-Gaussian result: stopped by request after completing validation for epochs
+  0--8 (before epoch 9 completed), preserving the best checkpoint. An
+  independent validation-only rerun of that checkpoint scored
+  55.90%/61.11%/44.70%/25.57%.
+- Comparison: at the selected checkpoint SAM-Gaussian is +0.97 percentage
+  points Acc@0.50 over the matched square control. This is a single-seed,
+  validation-only early-stopped result; do not use the test set or claim a final
+  generalization improvement without replication.
