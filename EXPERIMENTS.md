@@ -66,3 +66,13 @@
 - Final test: Square scored Acc@0.50/Acc@0.25/Mean IoU/Center Accuracy =
   48.30%/53.75%/38.15%/24.97%. SAM-Gaussian scored
   56.22%/61.77%/43.88%/26.52%, a +7.92/+8.02/+5.73/+1.55 percentage-point change.
+
+## P04: scratch 25-epoch position-encoding comparison
+
+- P04 repeats P03 from the same backbone-only initialization, extending the
+  budget to 25 epochs. It does not load a CVOGL_DroneAerial DetGeo checkpoint.
+- Both conditions use seed 13, batch size 8, base learning rate `1e-4`, and the
+  unchanged original YOLO head/loss/decode; SAM PromptFusion uses `1e-4`.
+- Outputs are isolated as `scratch25_square_seed13` and
+  `scratch25_sam_gaussian_seed13`. Select checkpoints exclusively by validation
+  before any test evaluation.
