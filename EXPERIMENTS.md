@@ -14,3 +14,9 @@
   including the YOLO head, remain frozen and in evaluation mode.
 - Budget: 5 epochs, seed 13, batch size 8, GPU 0. Select only by validation
   Acc@0.50; do not evaluate on test while choosing the design.
+- Result: best checkpoint was epoch 1 (zero-based epoch 0), with validation
+  Acc@0.50/Acc@0.25/Mean IoU/Center Accuracy =
+  56.66%/61.54%/45.26%/25.46%. The matched original checkpoint scored
+  56.01%/60.78%/44.76%/25.14%, a +0.65 percentage-point Acc@0.50 gain.
+- Decision: validation-only positive signal. Do not use test data or unfreeze
+  additional DetGeo modules until this result is replicated with a second seed.
