@@ -96,3 +96,15 @@
   count is restored to 8. The earlier worker-6 Square trajectory is therefore a
   different augmentation/randomness trajectory, not evidence of a changed
   Square model implementation.
+
+## P06: formal 25-epoch workers-8 comparison
+
+- This is the designated main-table protocol. P04 (workers=6) remains a
+  controlled augmentation-randomness diagnostic and is not used as the formal
+  Square baseline.
+- Both conditions use GPU 0, batch size 8, `num_workers=8`, seed 13, learning
+  rate `1e-4`, 25 epochs, beta 1.0, and no CVOGL_DroneAerial DetGeo checkpoint.
+  They retain only the original ImageNet ResNet18 and YOLO Darknet initializations.
+- Outputs are isolated as `scratch25_worker8_square_seed13` and
+  `scratch25_worker8_sam_gaussian_seed13`; select by validation before a single
+  final test evaluation of each selected checkpoint.
