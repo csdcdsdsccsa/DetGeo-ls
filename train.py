@@ -20,6 +20,8 @@ from torchvision.transforms import Compose, ToTensor, Normalize
 
 from dataset.data_loader import RSDataset
 from model.DetGeo import DetGeo
+from dataset.sam_prompt_loader import SAMPromptDataset
+from model.DetGeo_sam_prompt import DetGeoSAMPrompt
 from model.loss import yolo_loss, build_target, adjust_learning_rate
 from utils.utils import AverageMeter, eval_iou_acc
 from utils.checkpoint import save_checkpoint, load_pretrain
@@ -42,6 +44,10 @@ def main():
     parser.add_argument('--savename', default='default', type=str, help='Name head for saved model')
     parser.add_argument('--seed', default=13, type=int, help='random seed')
     parser.add_argument('--beta', default=1.0, type=float, help='the weight of cls loss')
+    parser.add_argument('--sam_prompt', action='store_true', help='use offline SAM/Gaussian prompt residual with the original YOLO head')
+    parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
+    parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
+    parser.add_argument('--freeze_prompt_only', action='store_true', help='train only the zero-init prompt_fusion module')
     parser.add_argument('--test', dest='test', default=False, action='store_true', help='test')
     parser.add_argument('--val', dest='val', default=False, action='store_true', help='val')
     
@@ -87,22 +93,24 @@ def main():
             std=[0.229, 0.224, 0.225])
     ])
 
-    train_dataset = RSDataset(data_root=args.data_root,
+    dataset_class = SAMPromptDataset if args.sam_prompt else RSDataset
+    prompt_kwargs = {'sam_mask_root': args.sam_mask_root or None, 'gaussian_sigma': args.gaussian_sigma} if args.sam_prompt else {}
+    train_dataset = dataset_class(data_root=args.data_root,
                          data_name=args.data_name,
                          split_name='train',
                          img_size=args.img_size,
                          transform=input_transform,
-                         augment=True)
-    val_dataset = RSDataset(data_root=args.data_root,
+                         augment=True, **prompt_kwargs)
+    val_dataset = dataset_class(data_root=args.data_root,
                          data_name=args.data_name,
                          split_name='val',
                          img_size = args.img_size,
-                         transform=input_transform)
-    test_dataset = RSDataset(data_root=args.data_root,
+                         transform=input_transform, **prompt_kwargs)
+    test_dataset = dataset_class(data_root=args.data_root,
                          data_name=args.data_name,
                          split_name='test',
                          img_size = args.img_size,
-                         transform=input_transform)
+                         transform=input_transform, **prompt_kwargs)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
                               pin_memory=True, drop_last=False, num_workers=args.num_workers)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
@@ -111,17 +119,25 @@ def main():
                               pin_memory=True, drop_last=False, num_workers=args.num_workers)
     
     ## Model
-    model = DetGeo()
+    model = DetGeoSAMPrompt() if args.sam_prompt else DetGeo()
 
     model = torch.nn.DataParallel(model).cuda()
 
     if args.pretrain:
         model = load_pretrain(model, args, logging)
+
+    if args.freeze_prompt_only:
+        if not args.sam_prompt:
+            raise ValueError('--freeze_prompt_only requires --sam_prompt')
+        for name, parameter in model.named_parameters():
+            parameter.requires_grad = name.startswith('module.prompt_fusion.')
+        trainable = sum(parameter.nelement() for parameter in model.parameters() if parameter.requires_grad)
+        print('Frozen original DetGeo; trainable PromptFusion parameters:', trainable)
     
     print('Num of parameters:', sum([param.nelement() for param in model.parameters()]))
     logging.info('Num of parameters:%d'%int(sum([param.nelement() for param in model.parameters()])))
 
-    optimizer = torch.optim.RMSprop([{'params': model.parameters()},], lr=args.lr, weight_decay=0.0005)
+    optimizer = torch.optim.RMSprop([{'params': [p for p in model.parameters() if p.requires_grad]},], lr=args.lr, weight_decay=0.0005)
     
     ## training and testing
     best_accu = -float('Inf')
@@ -148,6 +164,20 @@ def main():
         print('\nBest Accu: %f\n'%best_accu)
         logging.info('\nBest Accu: %f\n'%best_accu)
 
+def unpack_batch(batch, args):
+    if args.sam_prompt:
+        query_imgs, rs_imgs, original_click_map, gaussian_map, sam_mask, masked_gaussian, ori_gt_bbox, sample_index = batch
+        return query_imgs, rs_imgs, original_click_map, ori_gt_bbox, sample_index, (gaussian_map, sam_mask, masked_gaussian)
+    query_imgs, rs_imgs, original_click_map, ori_gt_bbox, sample_index = batch
+    return query_imgs, rs_imgs, original_click_map, ori_gt_bbox, sample_index, ()
+
+
+def forward_model(model, query_imgs, rs_imgs, original_click_map, prompt_maps):
+    if prompt_maps:
+        return model(query_imgs, rs_imgs, original_click_map, *prompt_maps)
+    return model(query_imgs, rs_imgs, original_click_map)
+
+
 def train_epoch(train_loader, model, optimizer, epoch, args):
     batch_time = AverageMeter()
     avg_losses = AverageMeter()
@@ -158,18 +188,24 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
     avg_iou = AverageMeter()
 
     model.train()
+    if args.freeze_prompt_only:
+        for name, module in model.module.named_modules():
+            if name and not name.startswith('prompt_fusion'):
+                module.eval()
     end = time.time()
     anchors_full = np.array([float(x.strip()) for x in args.anchors.split(',')])
     anchors_full = anchors_full.reshape(-1, 2)[::-1].copy()
     anchors_full = torch.tensor(anchors_full, dtype=torch.float32).cuda()
     
-    for batch_idx, (query_imgs, rs_imgs, mat_clickxy, ori_gt_bbox, _) in enumerate(train_loader):
+    for batch_idx, batch in enumerate(train_loader):
+        query_imgs, rs_imgs, mat_clickxy, ori_gt_bbox, _, prompt_maps = unpack_batch(batch, args)
         query_imgs, rs_imgs = query_imgs.cuda(), rs_imgs.cuda()
         mat_clickxy = mat_clickxy.cuda()
+        prompt_maps = tuple(prompt_map.cuda() for prompt_map in prompt_maps)
         ori_gt_bbox = ori_gt_bbox.cuda()
         ori_gt_bbox = torch.clamp(ori_gt_bbox, min=0, max=args.img_size-1)
 
-        pred_anchor, _ = model(query_imgs, rs_imgs, mat_clickxy)
+        pred_anchor, _ = forward_model(model, query_imgs, rs_imgs, mat_clickxy, prompt_maps)
         pred_anchor = pred_anchor.view(pred_anchor.shape[0], 9, 5, pred_anchor.shape[2], pred_anchor.shape[3])
         
         ## convert gt box to center+offset format
@@ -228,14 +264,16 @@ def test_epoch(data_loader, model, args):
     anchors_full = anchors_full.reshape(-1, 2)[::-1].copy()
     anchors_full = torch.tensor(anchors_full, dtype=torch.float32).cuda()
 
-    for batch_idx, (query_imgs, rs_imgs, mat_clickxy, ori_gt_bbox, _) in enumerate(data_loader):
+    for batch_idx, batch in enumerate(data_loader):
+        query_imgs, rs_imgs, mat_clickxy, ori_gt_bbox, _, prompt_maps = unpack_batch(batch, args)
         query_imgs, rs_imgs = query_imgs.cuda(), rs_imgs.cuda()
         mat_clickxy = mat_clickxy.cuda()
+        prompt_maps = tuple(prompt_map.cuda() for prompt_map in prompt_maps)
         ori_gt_bbox = ori_gt_bbox.cuda()
         ori_gt_bbox = torch.clamp(ori_gt_bbox, min=0, max=args.img_size-1)
 
         with torch.no_grad():
-            pred_anchor, attn_score = model(query_imgs, rs_imgs, mat_clickxy)
+            pred_anchor, attn_score = forward_model(model, query_imgs, rs_imgs, mat_clickxy, prompt_maps)
         pred_anchor = pred_anchor.view(pred_anchor.shape[0],\
             9, 5, pred_anchor.shape[2], pred_anchor.shape[3])
         
