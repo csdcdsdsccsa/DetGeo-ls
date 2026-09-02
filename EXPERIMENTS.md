@@ -90,3 +90,9 @@
   seed 13, batch size 8, learning rate `1e-4`, and `num_workers=8` to match the
   original 25-epoch run. It runs exactly one epoch and is compared to the
   original epoch-0 log; it is not a new performance result.
+- Result: the epoch-0 validation Acc@0.50 was 29.1441%, exactly matching the
+  original log. The logged batch-50 and later epoch-0 metrics also matched,
+  confirming the non-SAM code path and initialization reproduce when worker
+  count is restored to 8. The earlier worker-6 Square trajectory is therefore a
+  different augmentation/randomness trajectory, not evidence of a changed
+  Square model implementation.
