@@ -34,6 +34,7 @@ def main():
 
     parser.add_argument('--max_epoch', default=25, type=int, help='training epoch')
     parser.add_argument('--lr', default=1e-4, type=float, help='learning rate')
+    parser.add_argument('--prompt_lr', default=1e-4, type=float, help='learning rate for the newly initialized PromptFusion')
     parser.add_argument('--batch_size', default=12, type=int, help='batch size')
     parser.add_argument('--emb_size', default=512, type=int, help='embedding dimensions')
     parser.add_argument('--img_size', default=1024, type=int, help='image size')
@@ -137,7 +138,20 @@ def main():
     print('Num of parameters:', sum([param.nelement() for param in model.parameters()]))
     logging.info('Num of parameters:%d'%int(sum([param.nelement() for param in model.parameters()])))
 
-    optimizer = torch.optim.RMSprop([{'params': [p for p in model.parameters() if p.requires_grad]},], lr=args.lr, weight_decay=0.0005)
+    if args.sam_prompt:
+        prompt_params, base_params = [], []
+        for name, parameter in model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            (prompt_params if 'prompt_fusion.' in name else base_params).append(parameter)
+        optimizer_groups = []
+        if base_params:
+            optimizer_groups.append({'params': base_params, 'lr': args.lr, 'base_lr': args.lr})
+        if prompt_params:
+            optimizer_groups.append({'params': prompt_params, 'lr': args.prompt_lr, 'base_lr': args.prompt_lr})
+    else:
+        optimizer_groups = [{'params': [p for p in model.parameters() if p.requires_grad], 'lr': args.lr, 'base_lr': args.lr}]
+    optimizer = torch.optim.RMSprop(optimizer_groups, weight_decay=0.0005)
     
     ## training and testing
     best_accu = -float('Inf')

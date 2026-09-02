@@ -9,12 +9,13 @@ from torch.autograd import Variable
 from utils.utils import bbox_iou, xyxy2xywh
 
 def adjust_learning_rate(args, optimizer, i_iter):
-    
-    lr = args.lr*((0.1)**(i_iter//10))
-        
-    print(("lr", lr))
-    for param_idx, param in enumerate(optimizer.param_groups):
-        param['lr'] = lr
+    decay = 0.1 ** (i_iter // 10)
+    current_lrs = []
+    for param_group in optimizer.param_groups:
+        lr = param_group.get('base_lr', args.lr) * decay
+        param_group['lr'] = lr
+        current_lrs.append(lr)
+    print(('lr', current_lrs))
 
 # the shape of the target is (batch_size, anchor_count, 5, grid_wh, grid_wh)
 def yolo_loss(predictions, gt_bboxes, anchors_full, best_anchor_gi_gj, image_wh):

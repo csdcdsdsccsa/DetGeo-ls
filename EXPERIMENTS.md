@@ -20,3 +20,13 @@
   56.01%/60.78%/44.76%/25.14%, a +0.65 percentage-point Acc@0.50 gain.
 - Decision: validation-only positive signal. Do not use test data or unfreeze
   additional DetGeo modules until this result is replicated with a second seed.
+
+## P02: full fine-tuning, square PE versus SAM-Gaussian PE
+
+- Design: replace, rather than augment, the original square click map. The new
+  position map is `Gaussian + PromptFusion(Gaussian, SAM, Gaussian*SAM)` and is
+  concatenated with RGB before the unchanged original 4-to-3 projection.
+- Controls: same original checkpoint, seed 13, batch size 8, augmentation,
+  10-epoch budget, original YOLO head/loss/decode, and validation protocol.
+- Learning rates: pretrained DetGeo parameters use `1e-5`; newly initialized
+  `prompt_fusion` uses `1e-4`. Test data is excluded.
