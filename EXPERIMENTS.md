@@ -39,5 +39,11 @@
   55.90%/61.11%/44.70%/25.57%.
 - Comparison: at the selected checkpoint SAM-Gaussian is +0.97 percentage
   points Acc@0.50 over the matched square control. This is a single-seed,
-  validation-only early-stopped result; do not use the test set or claim a final
-  generalization improvement without replication.
+  validation-only early-stopped result; do not use the test set for further
+  design selection or claim a final generalization improvement without replication.
+- Final test (explicitly authorized after checkpoint selection): the square
+  control scored Acc@0.50/Acc@0.25/Mean IoU/Center Accuracy =
+  56.42%/60.74%/45.44%/29.39%. The selected SAM-Gaussian checkpoint scored
+  58.48%/63.00%/46.55%/29.50%, respectively: +2.06/+2.26/+1.11/+0.11 percentage
+  points. Test split SAM masks were generated offline with the same point-prompt
+  ViT-B procedure used for train and validation.
