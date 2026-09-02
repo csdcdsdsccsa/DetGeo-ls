@@ -47,3 +47,14 @@
   58.48%/63.00%/46.55%/29.50%, respectively: +2.06/+2.26/+1.11/+0.11 percentage
   points. Test split SAM masks were generated offline with the same point-prompt
   ViT-B procedure used for train and validation.
+
+## P03: scratch 10-epoch position-encoding comparison
+
+- Both conditions start without a CVOGL_DroneAerial DetGeo checkpoint. Model
+  construction retains only the original ResNet18 ImageNet and Darknet53 YOLO
+  initializations.
+- Controls: seed 13, batch size 8, 10 epochs, base learning rate `1e-4`, and
+  unchanged original YOLO head/loss/decode. SAM PromptFusion also uses `1e-4`.
+- Outputs are isolated as `scratch10_square_seed13` and
+  `scratch10_sam_gaussian_seed13`; no test evaluation is used to choose either
+  checkpoint.
