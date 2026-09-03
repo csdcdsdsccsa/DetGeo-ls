@@ -152,3 +152,14 @@
   59.15%/63.81%/46.68%/27.41%.
 - Final test (one evaluation of that validation-selected checkpoint, batch size
   8 and `num_workers=16`): 63.21%/67.42%/50.10%/32.17%.
+
+## P09: RNG-controlled Gaussian-only vs. SAM-Gaussian
+
+- P09 changes no model or dataset behavior. It isolates only the random
+  trajectory: separate but identically seeded DataLoader generators control
+  train shuffle and worker seeds; `seed_worker` also seeds Python, NumPy,
+  PyTorch, OpenCV, and Albumentations augmentation RNGs.
+- The global runtime RNG is reset after model/optimizer construction, so SAM's
+  additional PromptFusion initialization cannot perturb later training
+  randomness. `--rng_probe` logs the first three batch indices, augmented
+  bboxes, and satellite-image sums before formal training begins.

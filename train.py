@@ -15,7 +15,7 @@ import gc
 import cv2
 
 from torch.autograd import Variable
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, get_worker_info
 from torchvision.transforms import Compose, ToTensor, Normalize
 
 from dataset.data_loader import RSDataset
@@ -27,6 +27,36 @@ from model.DetGeo_gaussian import DetGeoGaussian
 from model.loss import yolo_loss, build_target, adjust_learning_rate
 from utils.utils import AverageMeter, eval_iou_acc
 from utils.checkpoint import save_checkpoint, load_pretrain
+
+
+def seed_global_rng(seed):
+    """Seed process-level RNGs for a reproducible model/runtime state."""
+    random.seed(seed)
+    np.random.seed(seed + 1)
+    torch.manual_seed(seed + 2)
+    torch.cuda.manual_seed_all(seed + 3)
+
+
+def seed_worker(worker_id):
+    """Synchronize all per-worker augmentation RNGs from the loader generator."""
+    del worker_id
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+    cv2.setRNGSeed(int(worker_seed % (2 ** 31 - 1)))
+
+    worker_info = get_worker_info()
+    if worker_info is None:
+        return
+    dataset = worker_info.dataset
+    if hasattr(dataset, 'rs_transform') and hasattr(dataset.rs_transform, 'set_random_seed'):
+        dataset.rs_transform.set_random_seed(worker_seed)
+    if hasattr(dataset, 'myaugment'):
+        transform = getattr(dataset.myaugment, 'transform', None)
+        if transform is not None and hasattr(transform, 'set_random_seed'):
+            transform.set_random_seed((worker_seed + 1) % (2 ** 32))
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -46,6 +76,9 @@ def main():
     parser.add_argument('--print_freq', '-p', default=50, type=int, metavar='N', help='print frequency (default: 50)')
     parser.add_argument('--savename', default='default', type=str, help='Name head for saved model')
     parser.add_argument('--seed', default=13, type=int, help='random seed')
+    parser.add_argument('--loader_seed', default=None, type=int, help='independent seed for DataLoader shuffle and worker seeds')
+    parser.add_argument('--runtime_seed', default=None, type=int, help='reset global training RNG after model construction')
+    parser.add_argument('--rng_probe', action='store_true', help='print first batches to verify matched data/augmentation trajectories')
     parser.add_argument('--beta', default=1.0, type=float, help='the weight of cls loss')
     parser.add_argument('--sam_prompt', action='store_true', help='use offline SAM/Gaussian prompt residual with the original YOLO head')
     parser.add_argument('--gaussian_only', action='store_true', help='replace the square click map with Gaussian encoding only; no SAM or PromptFusion')
@@ -57,6 +90,10 @@ def main():
     
     global args, anchors_full
     args = parser.parse_args()
+    if args.loader_seed is None:
+        args.loader_seed = args.seed
+    if args.runtime_seed is None:
+        args.runtime_seed = args.seed
     if args.sam_prompt and args.gaussian_only:
         parser.error('--sam_prompt and --gaussian_only are mutually exclusive')
     print('----------------------------------------------------------------------')
@@ -68,10 +105,7 @@ def main():
     ## fix seed
     cudnn.benchmark = False
     cudnn.deterministic = True
-    random.seed(args.seed)
-    np.random.seed(args.seed+1)
-    torch.manual_seed(args.seed+2)
-    torch.cuda.manual_seed_all(args.seed+3)
+    seed_global_rng(args.seed)
 
     eps=1e-10
     ## following anchor sizes calculated by kmeans under args.anchor_imsize=1024
@@ -124,12 +158,21 @@ def main():
                          split_name='test',
                          img_size = args.img_size,
                          transform=input_transform, **prompt_kwargs)
+    train_generator = torch.Generator()
+    train_generator.manual_seed(args.loader_seed)
+    val_generator = torch.Generator()
+    val_generator.manual_seed(args.loader_seed + 1)
+    test_generator = torch.Generator()
+    test_generator.manual_seed(args.loader_seed + 2)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
-                              pin_memory=True, drop_last=False, num_workers=args.num_workers)
+                              pin_memory=True, drop_last=False, num_workers=args.num_workers,
+                              generator=train_generator, worker_init_fn=seed_worker)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
-                              pin_memory=True, drop_last=False, num_workers=args.num_workers)
+                              pin_memory=True, drop_last=False, num_workers=args.num_workers,
+                              generator=val_generator, worker_init_fn=seed_worker)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
-                              pin_memory=True, drop_last=False, num_workers=args.num_workers)
+                              pin_memory=True, drop_last=False, num_workers=args.num_workers,
+                              generator=test_generator, worker_init_fn=seed_worker)
     
     ## Model
     if args.sam_prompt:
@@ -169,6 +212,10 @@ def main():
     else:
         optimizer_groups = [{'params': [p for p in model.parameters() if p.requires_grad], 'lr': args.lr, 'base_lr': args.lr}]
     optimizer = torch.optim.RMSprop(optimizer_groups, weight_decay=0.0005)
+
+    # SAM creates extra PromptFusion parameters. Reset runtime RNG after all
+    # model/optimizer construction so later training randomness is matched.
+    seed_global_rng(args.runtime_seed)
     
     ## training and testing
     best_accu = -float('Inf')
@@ -232,7 +279,14 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
     anchors_full = torch.tensor(anchors_full, dtype=torch.float32).cuda()
     
     for batch_idx, batch in enumerate(train_loader):
-        query_imgs, rs_imgs, mat_clickxy, ori_gt_bbox, _, prompt_maps = unpack_batch(batch, args)
+        query_imgs, rs_imgs, mat_clickxy, ori_gt_bbox, sample_index, prompt_maps = unpack_batch(batch, args)
+        if args.rng_probe and epoch == 0 and batch_idx < 3:
+            print(
+                'RNG_PROBE batch={} indices={} bbox_head={} rs_sum={:.6f}'.format(
+                    batch_idx, sample_index.tolist(), ori_gt_bbox[:2].tolist(), float(rs_imgs.sum())
+                ),
+                flush=True,
+            )
         query_imgs, rs_imgs = query_imgs.cuda(), rs_imgs.cuda()
         mat_clickxy = mat_clickxy.cuda()
         prompt_maps = tuple(prompt_map.cuda() for prompt_map in prompt_maps)
