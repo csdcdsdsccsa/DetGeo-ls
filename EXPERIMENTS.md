@@ -186,3 +186,14 @@
   Gaussian-only scored 57.25%/62.90%/46.73%/28.37%, a
   +0.42/+1.75/+1.82/+1.24 percentage-point change. SAM-Gaussian then added
   +4.11/+2.57/+2.40/+0.92 points over Gaussian-only.
+
+## P10: original-RNG-matched three-stage ablation
+
+- P10 preserves the original DetGeo DataLoader behavior: no explicit loader
+  generator, worker initializer, or post-construction runtime RNG reset. It
+  therefore targets the historical original-DetGeo trajectory rather than the
+  new P09 trajectory.
+- Only the SAM route isolates the extra PromptFusion initialization: it saves
+  the post-DetGeo CPU torch RNG state, initializes PromptFusion normally, and
+  restores that state. PromptFusion weights remain initialized; downstream
+  DataLoader RNG starts at the same state as Square/Gaussian.

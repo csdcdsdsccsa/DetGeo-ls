@@ -79,6 +79,7 @@ def main():
     parser.add_argument('--loader_seed', default=None, type=int, help='independent seed for DataLoader shuffle and worker seeds')
     parser.add_argument('--runtime_seed', default=None, type=int, help='reset global training RNG after model construction')
     parser.add_argument('--rng_probe', action='store_true', help='print first batches to verify matched data/augmentation trajectories')
+    parser.add_argument('--original_rng_matched', action='store_true', help='P10: retain original DataLoader RNG behavior and isolate only SAM PromptFusion initialization RNG')
     parser.add_argument('--beta', default=1.0, type=float, help='the weight of cls loss')
     parser.add_argument('--sam_prompt', action='store_true', help='use offline SAM/Gaussian prompt residual with the original YOLO head')
     parser.add_argument('--gaussian_only', action='store_true', help='replace the square click map with Gaussian encoding only; no SAM or PromptFusion')
@@ -158,25 +159,30 @@ def main():
                          split_name='test',
                          img_size = args.img_size,
                          transform=input_transform, **prompt_kwargs)
-    train_generator = torch.Generator()
-    train_generator.manual_seed(args.loader_seed)
-    val_generator = torch.Generator()
-    val_generator.manual_seed(args.loader_seed + 1)
-    test_generator = torch.Generator()
-    test_generator.manual_seed(args.loader_seed + 2)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
-                              pin_memory=True, drop_last=False, num_workers=args.num_workers,
-                              generator=train_generator, worker_init_fn=seed_worker)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
-                              pin_memory=True, drop_last=False, num_workers=args.num_workers,
-                              generator=val_generator, worker_init_fn=seed_worker)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
-                              pin_memory=True, drop_last=False, num_workers=args.num_workers,
-                              generator=test_generator, worker_init_fn=seed_worker)
+    loader_kwargs = dict(batch_size=args.batch_size, pin_memory=True,
+                         drop_last=False, num_workers=args.num_workers)
+    if args.original_rng_matched:
+        # P10 deliberately reproduces DetGeo's original default DataLoader RNG.
+        train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
+        val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
+        test_loader = DataLoader(test_dataset, shuffle=False, **loader_kwargs)
+    else:
+        train_generator = torch.Generator()
+        train_generator.manual_seed(args.loader_seed)
+        val_generator = torch.Generator()
+        val_generator.manual_seed(args.loader_seed + 1)
+        test_generator = torch.Generator()
+        test_generator.manual_seed(args.loader_seed + 2)
+        train_loader = DataLoader(train_dataset, shuffle=True, generator=train_generator,
+                                  worker_init_fn=seed_worker, **loader_kwargs)
+        val_loader = DataLoader(val_dataset, shuffle=False, generator=val_generator,
+                                worker_init_fn=seed_worker, **loader_kwargs)
+        test_loader = DataLoader(test_dataset, shuffle=False, generator=test_generator,
+                                 worker_init_fn=seed_worker, **loader_kwargs)
     
     ## Model
     if args.sam_prompt:
-        model = DetGeoSAMPrompt()
+        model = DetGeoSAMPrompt(preserve_downstream_rng=args.original_rng_matched)
     elif args.gaussian_only:
         model = DetGeoGaussian()
     else:
@@ -213,9 +219,10 @@ def main():
         optimizer_groups = [{'params': [p for p in model.parameters() if p.requires_grad], 'lr': args.lr, 'base_lr': args.lr}]
     optimizer = torch.optim.RMSprop(optimizer_groups, weight_decay=0.0005)
 
-    # SAM creates extra PromptFusion parameters. Reset runtime RNG after all
-    # model/optimizer construction so later training randomness is matched.
-    seed_global_rng(args.runtime_seed)
+    if not args.original_rng_matched:
+        # P09: SAM creates extra PromptFusion parameters. Reset runtime RNG
+        # after model/optimizer construction so later training randomness matches.
+        seed_global_rng(args.runtime_seed)
     
     ## training and testing
     best_accu = -float('Inf')
