@@ -126,3 +126,10 @@
 - Outputs are isolated as `scratch25_worker24_square_seed13` and
   `scratch25_worker24_sam_gaussian_seed13`; select by validation before any
   final test evaluation.
+- Selected-checkpoint validation: Square scored
+  Acc@0.50/Acc@0.25/Mean IoU/Center Accuracy =
+  55.04%/59.59%/43.87%/26.22%; SAM-Gaussian scored
+  60.02%/64.25%/47.21%/27.52%, a +4.98/+4.66/+3.34/+1.30 percentage-point change.
+- Final test (one evaluation per validation-selected checkpoint): Square scored
+  57.76%/61.87%/45.87%/30.52%; SAM-Gaussian scored
+  59.82%/64.95%/48.58%/30.94%, a +2.06/+3.08/+2.71/+0.42 percentage-point change.
