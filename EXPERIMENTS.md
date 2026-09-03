@@ -117,3 +117,12 @@
   56.73%/60.53%/45.23%/28.88%, exactly reproducing the original checkpoint test.
   SAM-Gaussian scored 61.66%/67.52%/49.98%/34.22%, a
   +4.93/+6.99/+4.75/+5.34 percentage-point change.
+
+## P07: 25-epoch workers-24 comparison
+
+- P07 preserves the P06 protocol exactly, changing only `num_workers` from 8 to
+  24. Both conditions use GPU 0, batch size 8, seed 13, learning rate `1e-4`, 25
+  epochs, beta 1.0, and no CVOGL_DroneAerial DetGeo checkpoint.
+- Outputs are isolated as `scratch25_worker24_square_seed13` and
+  `scratch25_worker24_sam_gaussian_seed13`; select by validation before any
+  final test evaluation.
