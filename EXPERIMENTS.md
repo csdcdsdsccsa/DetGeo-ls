@@ -113,3 +113,7 @@
   56.01%/60.78%/44.76%/25.14%, exactly reproducing the original 25-epoch
   Square result. SAM-Gaussian scored 60.67%/64.90%/47.88%/27.41%, a
   +4.66/+4.12/+3.12/+2.27 percentage-point change.
+- Final test (one evaluation per validation-selected checkpoint): Square scored
+  56.73%/60.53%/45.23%/28.88%, exactly reproducing the original checkpoint test.
+  SAM-Gaussian scored 61.66%/67.52%/49.98%/34.22%, a
+  +4.93/+6.99/+4.75/+5.34 percentage-point change.
