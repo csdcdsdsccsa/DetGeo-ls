@@ -137,3 +137,13 @@
   checkpoints) reproduced the same four test metrics exactly for both
   conditions. This confirms that the test worker count changes throughput only
   for this deterministic evaluation protocol.
+
+## P08: Gaussian-only positional-encoding ablation
+
+- P08 isolates the contribution of changing DetGeo's original square click map
+  to a Gaussian map. It preserves the P07 scratch protocol: GPU 0, batch size
+  8, `num_workers=24`, seed 13, learning rate `1e-4`, 25 epochs, beta 1.0, and
+  no CVOGL_DroneAerial DetGeo checkpoint.
+- `--gaussian_only` uses `GaussianPromptDataset` and `DetGeoGaussian`: it
+  generates the Gaussian map from the click point but neither loads SAM masks
+  nor creates/uses PromptFusion. The YOLO detection head is unchanged.

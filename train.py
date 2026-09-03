@@ -22,6 +22,8 @@ from dataset.data_loader import RSDataset
 from model.DetGeo import DetGeo
 from dataset.sam_prompt_loader import SAMPromptDataset
 from model.DetGeo_sam_prompt import DetGeoSAMPrompt
+from dataset.gaussian_prompt_loader import GaussianPromptDataset
+from model.DetGeo_gaussian import DetGeoGaussian
 from model.loss import yolo_loss, build_target, adjust_learning_rate
 from utils.utils import AverageMeter, eval_iou_acc
 from utils.checkpoint import save_checkpoint, load_pretrain
@@ -46,6 +48,7 @@ def main():
     parser.add_argument('--seed', default=13, type=int, help='random seed')
     parser.add_argument('--beta', default=1.0, type=float, help='the weight of cls loss')
     parser.add_argument('--sam_prompt', action='store_true', help='use offline SAM/Gaussian prompt residual with the original YOLO head')
+    parser.add_argument('--gaussian_only', action='store_true', help='replace the square click map with Gaussian encoding only; no SAM or PromptFusion')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
     parser.add_argument('--freeze_prompt_only', action='store_true', help='train only the zero-init prompt_fusion module')
@@ -54,6 +57,8 @@ def main():
     
     global args, anchors_full
     args = parser.parse_args()
+    if args.sam_prompt and args.gaussian_only:
+        parser.error('--sam_prompt and --gaussian_only are mutually exclusive')
     print('----------------------------------------------------------------------')
     print(sys.argv[0])
     print(args)
@@ -94,8 +99,15 @@ def main():
             std=[0.229, 0.224, 0.225])
     ])
 
-    dataset_class = SAMPromptDataset if args.sam_prompt else RSDataset
-    prompt_kwargs = {'sam_mask_root': args.sam_mask_root or None, 'gaussian_sigma': args.gaussian_sigma} if args.sam_prompt else {}
+    if args.sam_prompt:
+        dataset_class = SAMPromptDataset
+        prompt_kwargs = {'sam_mask_root': args.sam_mask_root or None, 'gaussian_sigma': args.gaussian_sigma}
+    elif args.gaussian_only:
+        dataset_class = GaussianPromptDataset
+        prompt_kwargs = {'gaussian_sigma': args.gaussian_sigma}
+    else:
+        dataset_class = RSDataset
+        prompt_kwargs = {}
     train_dataset = dataset_class(data_root=args.data_root,
                          data_name=args.data_name,
                          split_name='train',
@@ -120,7 +132,12 @@ def main():
                               pin_memory=True, drop_last=False, num_workers=args.num_workers)
     
     ## Model
-    model = DetGeoSAMPrompt() if args.sam_prompt else DetGeo()
+    if args.sam_prompt:
+        model = DetGeoSAMPrompt()
+    elif args.gaussian_only:
+        model = DetGeoGaussian()
+    else:
+        model = DetGeo()
 
     model = torch.nn.DataParallel(model).cuda()
 
@@ -182,6 +199,9 @@ def unpack_batch(batch, args):
     if args.sam_prompt:
         query_imgs, rs_imgs, original_click_map, gaussian_map, sam_mask, masked_gaussian, ori_gt_bbox, sample_index = batch
         return query_imgs, rs_imgs, original_click_map, ori_gt_bbox, sample_index, (gaussian_map, sam_mask, masked_gaussian)
+    if args.gaussian_only:
+        query_imgs, rs_imgs, original_click_map, gaussian_map, ori_gt_bbox, sample_index = batch
+        return query_imgs, rs_imgs, original_click_map, ori_gt_bbox, sample_index, (gaussian_map,)
     query_imgs, rs_imgs, original_click_map, ori_gt_bbox, sample_index = batch
     return query_imgs, rs_imgs, original_click_map, ori_gt_bbox, sample_index, ()
 
