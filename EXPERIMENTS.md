@@ -176,3 +176,13 @@
   workers, batch size, and RNG probe to the unmodified DetGeo square click-map
   baseline. It is the final matched baseline for the Square -> Gaussian -> SAM
   ablation sequence.
+- Selected-checkpoint validation (batch size 8, `num_workers=16`): Square
+  scored 57.64%/62.51%/45.44%/25.03%; Gaussian-only scored
+  58.72%/63.38%/46.31%/27.63%, a +1.08/+0.87/+0.87/+2.60 percentage-point
+  change. SAM-Gaussian then added +1.95/+1.30/+1.72/+0.11 points over
+  Gaussian-only.
+- Final test (one evaluation per validation-selected checkpoint, batch size 8,
+  `num_workers=16`): Square scored 56.83%/61.15%/44.91%/27.13%;
+  Gaussian-only scored 57.25%/62.90%/46.73%/28.37%, a
+  +0.42/+1.75/+1.82/+1.24 percentage-point change. SAM-Gaussian then added
+  +4.11/+2.57/+2.40/+0.92 points over Gaussian-only.
