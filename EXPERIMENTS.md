@@ -172,3 +172,7 @@
   `num_workers=16`): Gaussian-only scored 57.25%/62.90%/46.73%/28.37%;
   SAM-Gaussian scored 61.36%/65.47%/49.13%/29.29%, a
   +4.11/+2.57/+2.40/+0.92 percentage-point change.
+- `scripts/run_p09_rngctrl_square.sh` applies the exact same P09 seeds,
+  workers, batch size, and RNG probe to the unmodified DetGeo square click-map
+  baseline. It is the final matched baseline for the Square -> Gaussian -> SAM
+  ablation sequence.
