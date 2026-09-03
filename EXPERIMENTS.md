@@ -147,3 +147,8 @@
 - `--gaussian_only` uses `GaussianPromptDataset` and `DetGeoGaussian`: it
   generates the Gaussian map from the click point but neither loads SAM masks
   nor creates/uses PromptFusion. The YOLO detection head is unchanged.
+- Selected-checkpoint validation (evaluated with batch size 8 and
+  `num_workers=16`): Acc@0.50/Acc@0.25/Mean IoU/Center Accuracy =
+  59.15%/63.81%/46.68%/27.41%.
+- Final test (one evaluation of that validation-selected checkpoint, batch size
+  8 and `num_workers=16`): 63.21%/67.42%/50.10%/32.17%.
