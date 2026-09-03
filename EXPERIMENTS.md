@@ -163,3 +163,12 @@
   additional PromptFusion initialization cannot perturb later training
   randomness. `--rng_probe` logs the first three batch indices, augmented
   bboxes, and satellite-image sums before formal training begins.
+- The one-epoch probes matched exactly for both methods on all three logged
+  batches: sample indices, augmented bbox heads, and satellite-image sums.
+- Selected-checkpoint validation (batch size 8, `num_workers=16`):
+  Gaussian-only scored 58.72%/63.38%/46.31%/27.63%; SAM-Gaussian scored
+  60.67%/64.68%/48.03%/27.74%, a +1.95/+1.30/+1.72/+0.11 percentage-point change.
+- Final test (one evaluation per validation-selected checkpoint, batch size 8,
+  `num_workers=16`): Gaussian-only scored 57.25%/62.90%/46.73%/28.37%;
+  SAM-Gaussian scored 61.36%/65.47%/49.13%/29.29%, a
+  +4.11/+2.57/+2.40/+0.92 percentage-point change.
