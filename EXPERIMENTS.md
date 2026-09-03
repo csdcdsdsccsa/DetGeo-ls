@@ -133,3 +133,7 @@
 - Final test (one evaluation per validation-selected checkpoint): Square scored
   57.76%/61.87%/45.87%/30.52%; SAM-Gaussian scored
   59.82%/64.95%/48.58%/30.94%, a +2.06/+3.08/+2.71/+0.42 percentage-point change.
+- Re-evaluation with `num_workers=16` (batch size 8, the same selected
+  checkpoints) reproduced the same four test metrics exactly for both
+  conditions. This confirms that the test worker count changes throughput only
+  for this deterministic evaluation protocol.
