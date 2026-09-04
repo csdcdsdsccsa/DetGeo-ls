@@ -220,3 +220,24 @@
   59.05%/63.71%/46.79%/26.54%.
 - Final test (one evaluation of that validation-selected checkpoint, batch size
   8, `num_workers=16`): 60.23%/64.23%/47.73%/32.48%.
+
+## P12: P10-RNG SAM P0 refinement and RGB-position interaction ablation
+
+- This experiment leaves the completed P10 routes untouched and uses the same
+  original-RNG DataLoader trajectory, 25 epochs, batch size 8, workers 24,
+  seed 13, and unchanged DetGeo head/loss/decode.
+- P10 isolation checks passed: all B/C/D post-DetGeo RNG states equal original
+  DetGeo; B/D SAM-refiner weights match; C/D RGB-position-fusion weights match;
+  and the RGB-position residual scale starts at zero.
+- B (SAM-refined P0 only), C (RGB-position interaction only), and D (both)
+  were trained sequentially.  Best checkpoints were selected only by validation
+  Acc@0.50, then each was evaluated exactly once on test using batch size 8 and
+  `num_workers=16`.
+- Validation Acc@0.50/Acc@0.25/Mean IoU/Center Accuracy: D Full =
+  56.99%/62.30%/45.83%/25.57%; B SAM-refined P0 =
+  57.96%/61.43%/46.00%/27.09%; C RGB-position only =
+  55.36%/59.91%/43.84%/26.22%.
+- Test Acc@0.50/Acc@0.25/Mean IoU/Center Accuracy: D Full =
+  59.40%/62.80%/47.32%/31.86%; B SAM-refined P0 =
+  59.30%/63.21%/47.01%/29.60%; C RGB-position only =
+  56.63%/61.97%/45.74%/29.60%.
