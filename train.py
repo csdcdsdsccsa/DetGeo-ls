@@ -85,6 +85,7 @@ def main():
     parser.add_argument('--runtime_seed', default=None, type=int, help='reset global training RNG after model construction')
     parser.add_argument('--rng_probe', action='store_true', help='print first batches to verify matched data/augmentation trajectories')
     parser.add_argument('--original_rng_matched', action='store_true', help='P10: retain original DataLoader RNG behavior and isolate only SAM PromptFusion initialization RNG')
+    parser.add_argument('--standard_rng', action='store_true', help='ordinary RNG: seed once, no module isolation, loader generator, worker seeding, or post-model reset')
     parser.add_argument('--beta', default=1.0, type=float, help='the weight of cls loss')
     parser.add_argument('--sam_prompt', action='store_true', help='use offline SAM/Gaussian prompt residual with the original YOLO head')
     parser.add_argument('--gaussian_only', action='store_true', help='replace the square click map with Gaussian encoding only; no SAM or PromptFusion')
@@ -113,6 +114,8 @@ def main():
         parser.error('--rgbp_interaction supports only original P0 or --sam_refined_pe')
     if args.hisym_pae and (args.rgbp_interaction or args.sam_prompt or args.gaussian_only or args.adaptive_sam_prompt):
         parser.error('--hisym_pae supports only original P0 or --sam_refined_pe')
+    if args.standard_rng and args.original_rng_matched:
+        parser.error('--standard_rng and --original_rng_matched are mutually exclusive')
     print('----------------------------------------------------------------------')
     print(sys.argv[0])
     print(args)
@@ -183,7 +186,9 @@ def main():
                          transform=input_transform, **prompt_kwargs)
     loader_kwargs = dict(batch_size=args.batch_size, pin_memory=True,
                          drop_last=False, num_workers=args.num_workers)
-    if args.original_rng_matched:
+    if args.original_rng_matched or args.standard_rng:
+        # P10 keeps its model-init RNG isolation; standard mode deliberately does not.
+        # Both retain DetGeo's ordinary DataLoader construction.
         # P10 deliberately reproduces DetGeo's original default DataLoader RNG.
         train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
         val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
@@ -269,7 +274,7 @@ def main():
         optimizer_groups = [{'params': [p for p in model.parameters() if p.requires_grad], 'lr': args.lr, 'base_lr': args.lr}]
     optimizer = torch.optim.RMSprop(optimizer_groups, weight_decay=0.0005)
 
-    if not args.original_rng_matched:
+    if not args.original_rng_matched and not args.standard_rng:
         # P09: SAM creates extra PromptFusion parameters. Reset runtime RNG
         # after model/optimizer construction so later training randomness matches.
         seed_global_rng(args.runtime_seed)
