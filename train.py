@@ -28,6 +28,7 @@ from dataset.adaptive_sam_prompt_loader import AdaptiveSAMPromptDataset
 from model.DetGeo_adaptive_sam import DetGeoAdaptiveSAM
 from dataset.sam_multimask_loader import SAMMultiMaskDataset
 from model.DetGeo_prompt_interaction import DetGeoPromptInteraction
+from model.DetGeo_hisym_pae import DetGeoHiSymPAE
 from model.loss import yolo_loss, build_target, adjust_learning_rate
 from utils.utils import AverageMeter, eval_iou_acc
 from utils.checkpoint import save_checkpoint, load_pretrain
@@ -90,6 +91,7 @@ def main():
     parser.add_argument('--adaptive_sam_prompt', action='store_true', help='use adaptive multi-mask SAM-Gaussian positional encoding')
     parser.add_argument('--sam_refined_pe', action='store_true', help='refine original DetGeo P0 with offline SAM multi-mask candidates')
     parser.add_argument('--rgbp_interaction', action='store_true', help='enable zero-residual bidirectional RGB-position interaction')
+    parser.add_argument('--hisym_pae', action='store_true', help='use HiSymGeo-style residual Conv3x3 RGB-position fusion')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
     parser.add_argument('--sam_multimask_root', default='', help='optional root of split-indexed SAM multi-mask npz files')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
@@ -109,6 +111,8 @@ def main():
         parser.error('only one positional-encoding mode can be selected')
     if args.rgbp_interaction and (args.sam_prompt or args.gaussian_only or args.adaptive_sam_prompt):
         parser.error('--rgbp_interaction supports only original P0 or --sam_refined_pe')
+    if args.hisym_pae and (args.rgbp_interaction or args.sam_prompt or args.gaussian_only or args.adaptive_sam_prompt):
+        parser.error('--hisym_pae supports only original P0 or --sam_refined_pe')
     print('----------------------------------------------------------------------')
     print(sys.argv[0])
     print(args)
@@ -199,7 +203,10 @@ def main():
                                  worker_init_fn=seed_worker, **loader_kwargs)
     
     ## Model
-    if args.sam_refined_pe or args.rgbp_interaction:
+    if args.hisym_pae:
+        model = DetGeoHiSymPAE(use_sam_refinement=args.sam_refined_pe,
+                               preserve_downstream_rng=args.original_rng_matched)
+    elif args.sam_refined_pe or args.rgbp_interaction:
         model = DetGeoPromptInteraction(use_sam_refinement=args.sam_refined_pe,
                                         use_rgbp_interaction=args.rgbp_interaction,
                                         preserve_downstream_rng=args.original_rng_matched)
@@ -219,12 +226,15 @@ def main():
         model = load_pretrain(model, args, logging)
 
     if args.freeze_prompt_only:
-        if not (args.sam_prompt or args.adaptive_sam_prompt or args.sam_refined_pe or args.rgbp_interaction):
+        if not (args.sam_prompt or args.adaptive_sam_prompt or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae):
             raise ValueError('--freeze_prompt_only requires a prompt mode')
         if args.sam_prompt:
             prefixes = ('module.prompt_fusion.',)
         elif args.adaptive_sam_prompt:
             prefixes = ('module.adaptive_prompt.',)
+        elif args.hisym_pae:
+            prefixes = tuple('module.' + p for p, active in
+                             (('sam_refiner.', args.sam_refined_pe), ('pae_fusion.', True)) if active)
         else:
             prefixes = tuple('module.' + p for p, active in
                              (('sam_refiner.', args.sam_refined_pe), ('rgbp_interaction.', args.rgbp_interaction)) if active)
@@ -236,7 +246,7 @@ def main():
     print('Num of parameters:', sum([param.nelement() for param in model.parameters()]))
     logging.info('Num of parameters:%d'%int(sum([param.nelement() for param in model.parameters()])))
 
-    if args.sam_prompt or args.adaptive_sam_prompt or args.sam_refined_pe or args.rgbp_interaction:
+    if args.sam_prompt or args.adaptive_sam_prompt or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae:
         prompt_params, base_params = [], []
         for name, parameter in model.named_parameters():
             if not parameter.requires_grad:
@@ -245,6 +255,8 @@ def main():
                 is_new = 'prompt_fusion.' in name
             elif args.adaptive_sam_prompt:
                 is_new = 'adaptive_prompt.' in name
+            elif args.hisym_pae:
+                is_new = 'sam_refiner.' in name or 'pae_fusion.' in name
             else:
                 is_new = 'sam_refiner.' in name or 'rgbp_interaction.' in name
             (prompt_params if is_new else base_params).append(parameter)
@@ -325,6 +337,9 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
             prompt_module_prefixes = ('prompt_fusion',)
         elif args.adaptive_sam_prompt:
             prompt_module_prefixes = ('adaptive_prompt',)
+        elif args.hisym_pae:
+            prompt_module_prefixes = tuple(p for p, active in
+                                           (('sam_refiner', args.sam_refined_pe), ('pae_fusion', True)) if active)
         else:
             prompt_module_prefixes = tuple(p for p, active in
                                            (('sam_refiner', args.sam_refined_pe), ('rgbp_interaction', args.rgbp_interaction)) if active)
