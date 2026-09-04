@@ -197,3 +197,14 @@
   the post-DetGeo CPU torch RNG state, initializes PromptFusion normally, and
   restores that state. PromptFusion weights remain initialized; downstream
   DataLoader RNG starts at the same state as Square/Gaussian.
+- The P10 Square one-epoch probe reproduced the prior
+  `scratch25_worker24_square_seed13` epoch-0 training batches and validation
+  metrics exactly. That completed 25-epoch run is therefore the P10 Square
+  baseline: validation 55.04%/59.59%/43.87%/26.22%, test
+  57.76%/61.87%/45.87%/30.52%.
+- Gaussian-only reproduced its original-trajectory results: validation
+  59.15%/63.81%/46.68%/27.41%, test 63.21%/67.42%/50.10%/32.17%.
+- RNG-isolated SAM-Gaussian: validation 61.21%/65.98%/48.54%/29.25%, test
+  60.95%/65.88%/48.69%/30.42%. Relative to Gaussian-only this is
+  +2.06/+2.17/+1.86/+1.84 points on validation and
+  -2.26/-1.54/-1.41/-1.75 points on test.
