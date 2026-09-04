@@ -24,6 +24,8 @@ from dataset.sam_prompt_loader import SAMPromptDataset
 from model.DetGeo_sam_prompt import DetGeoSAMPrompt
 from dataset.gaussian_prompt_loader import GaussianPromptDataset
 from model.DetGeo_gaussian import DetGeoGaussian
+from dataset.adaptive_sam_prompt_loader import AdaptiveSAMPromptDataset
+from model.DetGeo_adaptive_sam import DetGeoAdaptiveSAM
 from model.loss import yolo_loss, build_target, adjust_learning_rate
 from utils.utils import AverageMeter, eval_iou_acc
 from utils.checkpoint import save_checkpoint, load_pretrain
@@ -83,8 +85,12 @@ def main():
     parser.add_argument('--beta', default=1.0, type=float, help='the weight of cls loss')
     parser.add_argument('--sam_prompt', action='store_true', help='use offline SAM/Gaussian prompt residual with the original YOLO head')
     parser.add_argument('--gaussian_only', action='store_true', help='replace the square click map with Gaussian encoding only; no SAM or PromptFusion')
+    parser.add_argument('--adaptive_sam_prompt', action='store_true', help='use adaptive multi-mask SAM-Gaussian positional encoding')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
+    parser.add_argument('--sam_multimask_root', default='', help='optional root of split-indexed SAM multi-mask npz files')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
+    parser.add_argument('--sigma_min', default=8.0, type=float)
+    parser.add_argument('--sigma_max', default=50.0, type=float)
     parser.add_argument('--freeze_prompt_only', action='store_true', help='train only the zero-init prompt_fusion module')
     parser.add_argument('--test', dest='test', default=False, action='store_true', help='test')
     parser.add_argument('--val', dest='val', default=False, action='store_true', help='val')
@@ -95,8 +101,8 @@ def main():
         args.loader_seed = args.seed
     if args.runtime_seed is None:
         args.runtime_seed = args.seed
-    if args.sam_prompt and args.gaussian_only:
-        parser.error('--sam_prompt and --gaussian_only are mutually exclusive')
+    if sum((args.sam_prompt, args.gaussian_only, args.adaptive_sam_prompt)) > 1:
+        parser.error('--sam_prompt, --gaussian_only and --adaptive_sam_prompt are mutually exclusive')
     print('----------------------------------------------------------------------')
     print(sys.argv[0])
     print(args)
@@ -134,7 +140,10 @@ def main():
             std=[0.229, 0.224, 0.225])
     ])
 
-    if args.sam_prompt:
+    if args.adaptive_sam_prompt:
+        dataset_class = AdaptiveSAMPromptDataset
+        prompt_kwargs = {'sam_multimask_root': args.sam_multimask_root or None}
+    elif args.sam_prompt:
         dataset_class = SAMPromptDataset
         prompt_kwargs = {'sam_mask_root': args.sam_mask_root or None, 'gaussian_sigma': args.gaussian_sigma}
     elif args.gaussian_only:
@@ -181,7 +190,10 @@ def main():
                                  worker_init_fn=seed_worker, **loader_kwargs)
     
     ## Model
-    if args.sam_prompt:
+    if args.adaptive_sam_prompt:
+        model = DetGeoAdaptiveSAM(preserve_downstream_rng=args.original_rng_matched,
+                                  base_sigma=args.gaussian_sigma, sigma_min=args.sigma_min, sigma_max=args.sigma_max)
+    elif args.sam_prompt:
         model = DetGeoSAMPrompt(preserve_downstream_rng=args.original_rng_matched)
     elif args.gaussian_only:
         model = DetGeoGaussian()
@@ -194,22 +206,24 @@ def main():
         model = load_pretrain(model, args, logging)
 
     if args.freeze_prompt_only:
-        if not args.sam_prompt:
+        if not (args.sam_prompt or args.adaptive_sam_prompt):
             raise ValueError('--freeze_prompt_only requires --sam_prompt')
+        prefix = 'module.adaptive_prompt.' if args.adaptive_sam_prompt else 'module.prompt_fusion.'
         for name, parameter in model.named_parameters():
-            parameter.requires_grad = name.startswith('module.prompt_fusion.')
+            parameter.requires_grad = name.startswith(prefix)
         trainable = sum(parameter.nelement() for parameter in model.parameters() if parameter.requires_grad)
         print('Frozen original DetGeo; trainable PromptFusion parameters:', trainable)
     
     print('Num of parameters:', sum([param.nelement() for param in model.parameters()]))
     logging.info('Num of parameters:%d'%int(sum([param.nelement() for param in model.parameters()])))
 
-    if args.sam_prompt:
+    if args.sam_prompt or args.adaptive_sam_prompt:
         prompt_params, base_params = [], []
         for name, parameter in model.named_parameters():
             if not parameter.requires_grad:
                 continue
-            (prompt_params if 'prompt_fusion.' in name else base_params).append(parameter)
+            prompt_key = 'adaptive_prompt.' if args.adaptive_sam_prompt else 'prompt_fusion.'
+            (prompt_params if prompt_key in name else base_params).append(parameter)
         optimizer_groups = []
         if base_params:
             optimizer_groups.append({'params': base_params, 'lr': args.lr, 'base_lr': args.lr})
@@ -250,6 +264,9 @@ def main():
         logging.info('\nBest Accu: %f\n'%best_accu)
 
 def unpack_batch(batch, args):
+    if args.adaptive_sam_prompt:
+        query_imgs, rs_imgs, original_click_map, click_xy, sam_masks, sam_scores, ori_gt_bbox, sample_index = batch
+        return query_imgs, rs_imgs, original_click_map, ori_gt_bbox, sample_index, (click_xy, sam_masks, sam_scores)
     if args.sam_prompt:
         query_imgs, rs_imgs, original_click_map, gaussian_map, sam_mask, masked_gaussian, ori_gt_bbox, sample_index = batch
         return query_imgs, rs_imgs, original_click_map, ori_gt_bbox, sample_index, (gaussian_map, sam_mask, masked_gaussian)
@@ -277,8 +294,9 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
 
     model.train()
     if args.freeze_prompt_only:
+        prompt_module_prefix = 'adaptive_prompt' if args.adaptive_sam_prompt else 'prompt_fusion'
         for name, module in model.module.named_modules():
-            if name and not name.startswith('prompt_fusion'):
+            if name and not name.startswith(prompt_module_prefix):
                 module.eval()
     end = time.time()
     anchors_full = np.array([float(x.strip()) for x in args.anchors.split(',')])
