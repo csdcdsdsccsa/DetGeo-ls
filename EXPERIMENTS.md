@@ -244,3 +244,12 @@
 - A is the already-completed P10 original DetGeo control (original P0 and
   original 4-to-3 fusion, no SAM and no RGB-position module): validation
   55.04%/59.59%/43.87%/26.22%; test 57.76%/61.87%/45.87%/30.52%.
+
+## P12-new: P10-RNG HiSymGeo-style residual PAE
+
+- C-new uses original P0 and `q + ReLU(BN(Conv3x3([q,P0])))`; D-new adds the
+  unchanged B SAMPositionRefiner before the same PAE. Old gated C/D files and
+  results remain separate.
+- Validation-selected checkpoint test (batch size 8, workers 16): C-new =
+  60.74%/66.08%/48.66%/31.35%; D-new =
+  59.92%/65.47%/48.37%/30.94% (Acc@0.50/Acc@0.25/Mean IoU/Center Accuracy).
