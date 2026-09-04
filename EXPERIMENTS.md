@@ -241,3 +241,6 @@
   59.40%/62.80%/47.32%/31.86%; B SAM-refined P0 =
   59.30%/63.21%/47.01%/29.60%; C RGB-position only =
   56.63%/61.97%/45.74%/29.60%.
+- A is the already-completed P10 original DetGeo control (original P0 and
+  original 4-to-3 fusion, no SAM and no RGB-position module): validation
+  55.04%/59.59%/43.87%/26.22%; test 57.76%/61.87%/45.87%/30.52%.
