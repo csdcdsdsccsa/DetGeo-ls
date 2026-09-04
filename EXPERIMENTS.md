@@ -208,3 +208,15 @@
   60.95%/65.88%/48.69%/30.42%. Relative to Gaussian-only this is
   +2.06/+2.17/+1.86/+1.84 points on validation and
   -2.26/-1.54/-1.41/-1.75 points on test.
+
+## P11: P10-RNG adaptive multi-mask SAM-Gaussian
+
+- P11 preserves P10's original DataLoader RNG behavior. The Adaptive module
+  passes an RNG-isolation unit test and starts exactly as `P = G_25`; its
+  three-batch probe matches the P10 original trajectory.
+- The offline `sam_multimask` cache contains all three point-prompted SAM
+  candidates and scores for train/val/test (4,343/923/973 samples).
+- Selected-checkpoint validation (batch size 8, `num_workers=16`):
+  59.05%/63.71%/46.79%/26.54%.
+- Final test (one evaluation of that validation-selected checkpoint, batch size
+  8, `num_workers=16`): 60.23%/64.23%/47.73%/32.48%.
