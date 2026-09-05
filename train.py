@@ -30,6 +30,8 @@ from dataset.sam_multimask_loader import SAMMultiMaskDataset
 from model.DetGeo_prompt_interaction import DetGeoPromptInteraction
 from model.DetGeo_hisym_pae import DetGeoHiSymPAE
 from model.DetGeo_hisym_pae_inline import DetGeoHiSymPAEInline
+from dataset.adaptive_gaussian_field_loader import AdaptiveGaussianFieldDataset
+from model.DetGeo_adaptive_gaussian_field import DetGeoAdaptiveGaussianField
 from model.loss import yolo_loss, build_target, adjust_learning_rate
 from utils.utils import AverageMeter, eval_iou_acc
 from utils.checkpoint import save_checkpoint, load_pretrain
@@ -95,6 +97,18 @@ def main():
     parser.add_argument('--rgbp_interaction', action='store_true', help='enable zero-residual bidirectional RGB-position interaction')
     parser.add_argument('--hisym_pae', action='store_true', help='use HiSymGeo-style residual Conv3x3 RGB-position fusion')
     parser.add_argument('--hisym_pae_inline_init', action='store_true', help='standalone P0+PAE with PAE initialized at the original click-fusion slot')
+    parser.add_argument('--adaptive_gaussian_field', action='store_true',
+                        help='content-adaptive Gaussian-only position field; no SAM or RGB PAE')
+    parser.add_argument('--gaussian_field_mode', choices=('msg', 'msg_ag', 'full'), default='msg',
+                        help='adaptive Gaussian field: multi-scale, anisotropic, or core/context')
+    parser.add_argument('--gaussian_bank', default='12,20,25,35,50',
+                        help='comma-separated feature-map-scale sigma bank; must include --gaussian_sigma')
+    parser.add_argument('--gaussian_context_scale', default=2.0, type=float,
+                        help='wide/core sigma ratio for Gaussian field full mode')
+    parser.add_argument('--gaussian_gamma_init', default=0.05, type=float,
+                        help='initial adaptive-field residual gate value in (0,1)')
+    parser.add_argument('--gaussian_beta_init', default=0.05, type=float,
+                        help='initial full-mode context gate value in (0,1)')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
     parser.add_argument('--sam_multimask_root', default='', help='optional root of split-indexed SAM multi-mask npz files')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
@@ -110,6 +124,14 @@ def main():
         args.loader_seed = args.seed
     if args.runtime_seed is None:
         args.runtime_seed = args.seed
+    try:
+        args.gaussian_bank_values = tuple(float(value.strip()) for value in args.gaussian_bank.split(',') if value.strip())
+    except ValueError:
+        parser.error('--gaussian_bank must be a comma-separated list of numbers')
+    if not args.gaussian_bank_values or args.gaussian_sigma not in args.gaussian_bank_values:
+        parser.error('--gaussian_bank must include --gaussian_sigma')
+    if not (0.0 < args.gaussian_gamma_init < 1.0 and 0.0 < args.gaussian_beta_init < 1.0):
+        parser.error('--gaussian_gamma_init and --gaussian_beta_init must be in (0,1)')
     if sum((args.sam_prompt, args.gaussian_only, args.adaptive_sam_prompt, args.sam_refined_pe)) > 1:
         parser.error('only one positional-encoding mode can be selected')
     if args.rgbp_interaction and (args.sam_prompt or args.gaussian_only or args.adaptive_sam_prompt):
@@ -123,6 +145,12 @@ def main():
         parser.error('--hisym_pae_inline_init is a standalone P0+PAE confirmation experiment')
     if args.hisym_pae_inline_init and not args.standard_rng:
         parser.error('--hisym_pae_inline_init must use --standard_rng')
+    if args.adaptive_gaussian_field and (args.sam_prompt or args.gaussian_only or args.adaptive_sam_prompt
+                                         or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae
+                                         or args.hisym_pae_inline_init):
+        parser.error('--adaptive_gaussian_field is a standalone Gaussian-only experiment')
+    if args.adaptive_gaussian_field and not args.standard_rng:
+        parser.error('--adaptive_gaussian_field must use --standard_rng (P08-style ordinary RNG)')
     print('----------------------------------------------------------------------')
     print(sys.argv[0])
     print(args)
@@ -160,7 +188,10 @@ def main():
             std=[0.229, 0.224, 0.225])
     ])
 
-    if args.sam_refined_pe:
+    if args.adaptive_gaussian_field:
+        dataset_class = AdaptiveGaussianFieldDataset
+        prompt_kwargs = {}
+    elif args.sam_refined_pe:
         dataset_class = SAMMultiMaskDataset
         prompt_kwargs = {'sam_multimask_root': args.sam_multimask_root or None}
     elif args.adaptive_sam_prompt:
@@ -215,7 +246,15 @@ def main():
                                  worker_init_fn=seed_worker, **loader_kwargs)
     
     ## Model
-    if args.hisym_pae_inline_init:
+    if args.adaptive_gaussian_field:
+        model = DetGeoAdaptiveGaussianField(emb_size=args.emb_size, leaky=True,
+                                            mode=args.gaussian_field_mode,
+                                            sigma_bank=args.gaussian_bank_values,
+                                            base_sigma=args.gaussian_sigma,
+                                            context_scale=args.gaussian_context_scale,
+                                            gamma_init=args.gaussian_gamma_init,
+                                            beta_init=args.gaussian_beta_init)
+    elif args.hisym_pae_inline_init:
         model = DetGeoHiSymPAEInline(emb_size=args.emb_size, leaky=True)
     elif args.hisym_pae:
         model = DetGeoHiSymPAE(use_sam_refinement=args.sam_refined_pe,
@@ -260,12 +299,14 @@ def main():
     print('Num of parameters:', sum([param.nelement() for param in model.parameters()]))
     logging.info('Num of parameters:%d'%int(sum([param.nelement() for param in model.parameters()])))
 
-    if args.sam_prompt or args.adaptive_sam_prompt or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae:
+    if args.sam_prompt or args.adaptive_sam_prompt or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae or args.adaptive_gaussian_field:
         prompt_params, base_params = [], []
         for name, parameter in model.named_parameters():
             if not parameter.requires_grad:
                 continue
-            if args.sam_prompt:
+            if args.adaptive_gaussian_field:
+                is_new = 'gaussian_field.' in name
+            elif args.sam_prompt:
                 is_new = 'prompt_fusion.' in name
             elif args.adaptive_sam_prompt:
                 is_new = 'adaptive_prompt.' in name
@@ -314,6 +355,9 @@ def main():
         logging.info('\nBest Accu: %f\n'%best_accu)
 
 def unpack_batch(batch, args):
+    if args.adaptive_gaussian_field:
+        query_imgs, rs_imgs, original_click_map, click_xy, ori_gt_bbox, sample_index = batch
+        return query_imgs, rs_imgs, original_click_map, ori_gt_bbox, sample_index, (click_xy,)
     if args.sam_refined_pe:
         query_imgs, rs_imgs, original_click_map, sam_masks, sam_scores, ori_gt_bbox, sample_index = batch
         return query_imgs, rs_imgs, original_click_map, ori_gt_bbox, sample_index, (sam_masks, sam_scores)
