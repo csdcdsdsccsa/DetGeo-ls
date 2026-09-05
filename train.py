@@ -99,7 +99,7 @@ def main():
     parser.add_argument('--hisym_pae_inline_init', action='store_true', help='standalone P0+PAE with PAE initialized at the original click-fusion slot')
     parser.add_argument('--adaptive_gaussian_field', action='store_true',
                         help='content-adaptive Gaussian-only position field; no SAM or RGB PAE')
-    parser.add_argument('--gaussian_field_mode', choices=('msg', 'msg_ag', 'full'), default='msg',
+    parser.add_argument('--gaussian_field_mode', choices=('msg', 'msg_ag', 'full', 'g25_ag', 'g25_cc', 'g25_ag_cc'), default='msg',
                         help='adaptive Gaussian field: multi-scale, anisotropic, or core/context')
     parser.add_argument('--gaussian_bank', default='12,20,25,35,50',
                         help='comma-separated feature-map-scale sigma bank; must include --gaussian_sigma')
