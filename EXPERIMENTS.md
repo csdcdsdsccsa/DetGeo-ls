@@ -253,3 +253,21 @@
 - Validation-selected checkpoint test (batch size 8, workers 16): C-new =
   60.74%/66.08%/48.66%/31.35%; D-new =
   59.92%/65.47%/48.37%/30.94% (Acc@0.50/Acc@0.25/Mean IoU/Center Accuracy).
+
+## P13-standard: ordinary-RNG A/B/C/D HiSymGeo ablation
+
+- Protocol follows the original P07/P08 style: seed once at startup, natural
+  model/DataLoader RNG consumption, no RNG save/restore, no explicit loader
+  generator or worker initializer, and no post-construction seed reset. It
+  retains GPU 0, 25 epochs, batch size 8, workers 24, seed 13, lr 1e-4, and no
+  task checkpoint.
+- Validation-selected checkpoints (Acc@0.50/Acc@0.25/Mean IoU/Center Accuracy):
+  A original DetGeo = 55.04%/59.59%/43.87%/26.22%; B SAM-refined P0 =
+  56.01%/61.65%/45.15%/24.38%; C HiSymGeo PAE =
+  62.51%/67.28%/49.35%/28.49%; D SAM + HiSymGeo PAE =
+  59.91%/65.33%/47.84%/27.52%.
+- Final test (one evaluation per validation-selected checkpoint, batch size 8,
+  workers 16): A = 57.76%/61.87%/45.87%/30.52%; B =
+  58.38%/63.31%/46.95%/29.91%; C =
+  62.59%/67.63%/49.52%/32.27%; D =
+  59.61%/64.95%/48.03%/29.60%.
