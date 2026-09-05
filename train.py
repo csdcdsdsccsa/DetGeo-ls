@@ -29,6 +29,7 @@ from model.DetGeo_adaptive_sam import DetGeoAdaptiveSAM
 from dataset.sam_multimask_loader import SAMMultiMaskDataset
 from model.DetGeo_prompt_interaction import DetGeoPromptInteraction
 from model.DetGeo_hisym_pae import DetGeoHiSymPAE
+from model.DetGeo_hisym_pae_inline import DetGeoHiSymPAEInline
 from model.loss import yolo_loss, build_target, adjust_learning_rate
 from utils.utils import AverageMeter, eval_iou_acc
 from utils.checkpoint import save_checkpoint, load_pretrain
@@ -93,6 +94,7 @@ def main():
     parser.add_argument('--sam_refined_pe', action='store_true', help='refine original DetGeo P0 with offline SAM multi-mask candidates')
     parser.add_argument('--rgbp_interaction', action='store_true', help='enable zero-residual bidirectional RGB-position interaction')
     parser.add_argument('--hisym_pae', action='store_true', help='use HiSymGeo-style residual Conv3x3 RGB-position fusion')
+    parser.add_argument('--hisym_pae_inline_init', action='store_true', help='standalone P0+PAE with PAE initialized at the original click-fusion slot')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
     parser.add_argument('--sam_multimask_root', default='', help='optional root of split-indexed SAM multi-mask npz files')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
@@ -116,6 +118,11 @@ def main():
         parser.error('--hisym_pae supports only original P0 or --sam_refined_pe')
     if args.standard_rng and args.original_rng_matched:
         parser.error('--standard_rng and --original_rng_matched are mutually exclusive')
+    if args.hisym_pae_inline_init and (args.hisym_pae or args.sam_refined_pe or args.rgbp_interaction
+                                       or args.sam_prompt or args.gaussian_only or args.adaptive_sam_prompt):
+        parser.error('--hisym_pae_inline_init is a standalone P0+PAE confirmation experiment')
+    if args.hisym_pae_inline_init and not args.standard_rng:
+        parser.error('--hisym_pae_inline_init must use --standard_rng')
     print('----------------------------------------------------------------------')
     print(sys.argv[0])
     print(args)
@@ -208,7 +215,9 @@ def main():
                                  worker_init_fn=seed_worker, **loader_kwargs)
     
     ## Model
-    if args.hisym_pae:
+    if args.hisym_pae_inline_init:
+        model = DetGeoHiSymPAEInline(emb_size=args.emb_size, leaky=True)
+    elif args.hisym_pae:
         model = DetGeoHiSymPAE(use_sam_refinement=args.sam_refined_pe,
                                preserve_downstream_rng=args.original_rng_matched)
     elif args.sam_refined_pe or args.rgbp_interaction:
