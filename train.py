@@ -32,6 +32,7 @@ from model.DetGeo_hisym_pae import DetGeoHiSymPAE
 from model.DetGeo_hisym_pae_inline import DetGeoHiSymPAEInline
 from dataset.adaptive_gaussian_field_loader import AdaptiveGaussianFieldDataset
 from model.DetGeo_adaptive_gaussian_field import DetGeoAdaptiveGaussianField
+from model.DetGeo_b import DetGeoB
 from model.loss import yolo_loss, build_target, adjust_learning_rate
 from utils.utils import AverageMeter, eval_iou_acc
 from utils.checkpoint import save_checkpoint, load_pretrain
@@ -109,6 +110,11 @@ def main():
                         help='initial adaptive-field residual gate value in (0,1)')
     parser.add_argument('--gaussian_beta_init', default=0.05, type=float,
                         help='initial full-mode context gate value in (0,1)')
+    parser.add_argument('--b_variant', choices=('none', 'msst', 'core', 'b1', 'b2'), default='none',
+                        help='original-P0 B framework variant; none retains the unmodified DetGeo baseline')
+    parser.add_argument('--b_num_tokens', type=int, default=8, help='shared MSST token count')
+    parser.add_argument('--b_num_heads', type=int, default=8, help='attention head count for DetGeoB')
+    parser.add_argument('--b_ffn_dim', type=int, default=1024, help='attention FFN width for DetGeoB')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
     parser.add_argument('--sam_multimask_root', default='', help='optional root of split-indexed SAM multi-mask npz files')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
@@ -151,6 +157,10 @@ def main():
         parser.error('--adaptive_gaussian_field is a standalone Gaussian-only experiment')
     if args.adaptive_gaussian_field and not args.standard_rng:
         parser.error('--adaptive_gaussian_field must use --standard_rng (P08-style ordinary RNG)')
+    if args.b_variant != 'none' and (args.sam_prompt or args.gaussian_only or args.adaptive_sam_prompt
+                                     or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae
+                                     or args.hisym_pae_inline_init or args.adaptive_gaussian_field):
+        parser.error('--b_variant must use original DetGeo positional encoding only')
     print('----------------------------------------------------------------------')
     print(sys.argv[0])
     print(args)
@@ -188,7 +198,10 @@ def main():
             std=[0.229, 0.224, 0.225])
     ])
 
-    if args.adaptive_gaussian_field:
+    if args.b_variant != 'none':
+        model = DetGeoB(emb_size=args.emb_size, leaky=True, variant=args.b_variant,
+                         num_tokens=args.b_num_tokens, num_heads=args.b_num_heads, ffn_dim=args.b_ffn_dim)
+    elif args.adaptive_gaussian_field:
         dataset_class = AdaptiveGaussianFieldDataset
         prompt_kwargs = {}
     elif args.sam_refined_pe:
