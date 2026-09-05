@@ -271,3 +271,16 @@
   58.38%/63.31%/46.95%/29.91%; C =
   62.59%/67.63%/49.52%/32.27%; D =
   59.61%/64.95%/48.03%/29.60%.
+
+## C-inline: PAE at the original DetGeo initialization slot
+
+- This confirmation keeps C's P0+HiSymGeo residual PAE architecture and P13
+  standard RNG protocol, but constructs PAE directly where DetGeo formerly
+  initialized its 1x1 click fusion. It does not call `DetGeo.__init__()` then
+  delete/append modules, and does not alter old C.
+- Init-order check passed: old C's post-hoc construction leaves A's later
+  mapping/head initializations identical, whereas C-inline keeps A's
+  query-resnet/darknet initialization but changes later mapping/head draws.
+- Validation-selected checkpoint: validation =
+  60.24%/64.46%/47.64%/27.52%; final single test (workers 16) =
+  61.25%/66.80%/49.40%/31.86%.
