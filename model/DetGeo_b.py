@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
+from torch.utils.checkpoint import checkpoint
 
 from .darknet import ConvBatchNormReLU, Darknet
 from .DetGeo import CrossViewFusionModule
@@ -122,10 +123,17 @@ class DetGeoB(nn.Module):
         tokens = self.shared_tokens.expand(batch, -1, -1)
         return encoder(torch.cat((tokens, sequence), dim=1))[:, :self.num_tokens]
 
-    @staticmethod
-    def _bidirectional(tokens, feature_seq, t2x, x2t):
-        tokens_1, _ = t2x(tokens, feature_seq)
-        feature_1, _ = x2t(feature_seq, tokens_1)
+    def _cross(self, block, query_seq, kv_seq, return_attn=False):
+        """Checkpoint long satellite-query blocks during training without changing their math."""
+        if self.training and not return_attn:
+            output = checkpoint(lambda query, kv: block(query, kv, return_attn=False)[0],
+                                query_seq, kv_seq, use_reentrant=False)
+            return output, None
+        return block(query_seq, kv_seq, return_attn=return_attn)
+
+    def _bidirectional(self, tokens, feature_seq, t2x, x2t):
+        tokens_1, _ = self._cross(t2x, tokens, feature_seq)
+        feature_1, _ = self._cross(x2t, feature_seq, tokens_1)
         return tokens_1, feature_1
 
     def _token_and_scale_weights(self, tokens_f, tokens_m, tokens_c):
@@ -196,14 +204,14 @@ class DetGeoB(nn.Module):
         if self.variant == 'core':
             return self.fcn_out(core), None
         if self.variant == 'b1':
-            tokens_f2, attention_f = self.t2x_f(tokens_f1, seq_f1, return_attn=True)
-            tokens_m2, attention_m = self.t2x_m(tokens_m1, seq_m1, return_attn=True)
-            tokens_c2, attention_c = self.t2x_c(tokens_c1, seq_c1, return_attn=True)
+            tokens_f2, attention_f = self._cross(self.t2x_f, tokens_f1, seq_f1, return_attn=True)
+            tokens_m2, attention_m = self._cross(self.t2x_m, tokens_m1, seq_m1, return_attn=True)
+            tokens_c2, attention_c = self._cross(self.t2x_c, tokens_c1, seq_c1, return_attn=True)
             del tokens_f2, tokens_m2, tokens_c2
             response = self._response_map(attention_f, shape_f, attention_m, shape_m, attention_c, shape_c, token_weights, scale_weights)
             return self.fcn_out(core * response), response.squeeze(1)
-        seq_f2, _ = self.x2t_f(seq_f1, tokens_f1)
-        seq_m2, _ = self.x2t_m(seq_m1, tokens_m1)
-        seq_c2, _ = self.x2t_c(seq_c1, tokens_c1)
+        seq_f2, _ = self._cross(self.x2t_f, seq_f1, tokens_f1)
+        seq_m2, _ = self._cross(self.x2t_m, seq_m1, tokens_m1)
+        seq_c2, _ = self._cross(self.x2t_c, seq_c1, tokens_c1)
         refined = self._fuse_features(seq_f2, shape_f, seq_m2, shape_m, seq_c2, shape_c, scale_weights)
         return self.fcn_out(refined), None
