@@ -83,6 +83,10 @@ def main():
     parser.add_argument('--data_root', type=str, default='./data', help='path to the root folder of all dataset')
     parser.add_argument('--data_name', default='CVOGL_DroneAerial', type=str, help='CVOGL_DroneAerial/CVOGL_SVI')
     parser.add_argument('--pretrain', default='', type=str, metavar='PATH')
+    parser.add_argument('--resume', default='', type=str, metavar='PATH',
+                        help='resume model, optimizer and epoch from a training checkpoint')
+    parser.add_argument('--resume_best_accu', default=None, type=float,
+                        help='best validation Acc@0.50 before resume; required to preserve historical best selection')
     parser.add_argument('--print_freq', '-p', default=50, type=int, metavar='N', help='print frequency (default: 50)')
     parser.add_argument('--savename', default='default', type=str, help='Name head for saved model')
     parser.add_argument('--seed', default=13, type=int, help='random seed')
@@ -129,6 +133,8 @@ def main():
     
     global args, anchors_full
     args = parser.parse_args()
+    if args.pretrain and args.resume:
+        parser.error('--pretrain and --resume are mutually exclusive')
     if args.loader_seed is None:
         args.loader_seed = args.seed
     if args.runtime_seed is None:
@@ -355,14 +361,24 @@ def main():
         seed_global_rng(args.runtime_seed)
     
     ## training and testing
+    start_epoch = 0
     best_accu = -float('Inf')
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location='cpu')
+        model.load_state_dict(checkpoint['state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        start_epoch = int(checkpoint['epoch'])
+        best_accu = float(args.resume_best_accu) if args.resume_best_accu is not None else float(checkpoint['best_loss'])
+        message = '=> resumed checkpoint {} at epoch {}, retained best Accu {:.6f}'.format(args.resume, start_epoch, best_accu)
+        print(message)
+        logging.info(message)
     
     if args.test:
         _ = test_epoch(test_loader, model, args)
     elif args.val:
         _ = test_epoch(val_loader, model, args)
     else:
-        for epoch in range(args.max_epoch):
+        for epoch in range(start_epoch, args.max_epoch):
             adjust_learning_rate(args, optimizer, epoch)
             gc.collect()
             train_epoch(train_loader, model, optimizer, epoch, args)
