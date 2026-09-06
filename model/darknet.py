@@ -482,6 +482,31 @@ class Darknet(nn.Module):
         else:
             return output
 
+    def forward_features(self, x):
+        """Return pre-YOLO multi-scale features without decoding detections.
+
+        This mirrors ``forward`` layer-by-layer so route/shortcut indices retain
+        their original meaning, but skips every YOLO decode operation.
+        """
+        features, layer_outputs = [], []
+        for module_def, module in zip(self.module_defs, self.module_list):
+            module_type = module_def['type']
+            if module_type in ['convolutional', 'upsample', 'maxpool']:
+                x = module(x)
+            elif module_type == 'route':
+                layer_i = [int(value) for value in module_def['layers'].split(',')]
+                x = torch.cat([layer_outputs[index] for index in layer_i], 1)
+            elif module_type == 'shortcut':
+                x = layer_outputs[-1] + layer_outputs[int(module_def['from'])]
+            elif module_type == 'yoloconvolutional':
+                features.append(x)
+                x = module(x)
+            elif module_type == 'yolo':
+                # Keep x unchanged: it is still needed by later route layers.
+                pass
+            layer_outputs.append(x)
+        return features
+
     def load_weights(self, weights_path):
         """Parses and loads the weights stored in 'weights_path'"""
 
