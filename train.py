@@ -213,6 +213,9 @@ def main():
 
     if args.backbone_exp != 'baseline':
         model = DetGeoBackboneAblation(emb_size=args.emb_size, leaky=True, backbone_exp=args.backbone_exp)
+        # Backbone ablations retain the original square-position RSDataset.
+        dataset_class = RSDataset
+        prompt_kwargs = {}
     elif args.b_variant != 'none':
         dataset_class = RSDataset
         prompt_kwargs = {}
