@@ -6,3 +6,4 @@ PYTHONPATH=. "$PYTHON_BIN" tools/test_backbone_ablation.py > logs/backbone_ablat
 bash scripts/run_backbone_darknet53_noshare.sh
 bash scripts/run_backbone_darknet53_shared.sh
 bash scripts/run_backbone_resnet50_shared.sh
+bash scripts/eval_backbone_ablation_test.sh
