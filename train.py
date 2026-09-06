@@ -199,8 +199,8 @@ def main():
     ])
 
     if args.b_variant != 'none':
-        model = DetGeoB(emb_size=args.emb_size, leaky=True, variant=args.b_variant,
-                         num_tokens=args.b_num_tokens, num_heads=args.b_num_heads, ffn_dim=args.b_ffn_dim)
+        dataset_class = RSDataset
+        prompt_kwargs = {}
     elif args.adaptive_gaussian_field:
         dataset_class = AdaptiveGaussianFieldDataset
         prompt_kwargs = {}
@@ -259,7 +259,10 @@ def main():
                                  worker_init_fn=seed_worker, **loader_kwargs)
     
     ## Model
-    if args.adaptive_gaussian_field:
+    if args.b_variant != 'none':
+        model = DetGeoB(emb_size=args.emb_size, leaky=True, variant=args.b_variant,
+                         num_tokens=args.b_num_tokens, num_heads=args.b_num_heads, ffn_dim=args.b_ffn_dim)
+    elif args.adaptive_gaussian_field:
         model = DetGeoAdaptiveGaussianField(emb_size=args.emb_size, leaky=True,
                                             mode=args.gaussian_field_mode,
                                             sigma_bank=args.gaussian_bank_values,
