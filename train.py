@@ -212,7 +212,6 @@ def main():
     ])
 
     if args.backbone_exp != 'baseline':
-        model = DetGeoBackboneAblation(emb_size=args.emb_size, leaky=True, backbone_exp=args.backbone_exp)
         # Backbone ablations retain the original square-position RSDataset.
         dataset_class = RSDataset
         prompt_kwargs = {}
@@ -277,7 +276,9 @@ def main():
                                  worker_init_fn=seed_worker, **loader_kwargs)
     
     ## Model
-    if args.b_variant != 'none':
+    if args.backbone_exp != 'baseline':
+        model = DetGeoBackboneAblation(emb_size=args.emb_size, leaky=True, backbone_exp=args.backbone_exp)
+    elif args.b_variant != 'none':
         model = DetGeoB(emb_size=args.emb_size, leaky=True, variant=args.b_variant,
                          num_tokens=args.b_num_tokens, num_heads=args.b_num_heads, ffn_dim=args.b_ffn_dim)
     elif args.adaptive_gaussian_field:
