@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader, get_worker_info
 from torchvision.transforms import Compose, ToTensor, Normalize
 
 from dataset.data_loader import RSDataset
+from dataset.trogeo_loader import TROGeoRSDataset
 from model.DetGeo import DetGeo
 from dataset.sam_prompt_loader import SAMPromptDataset
 from model.DetGeo_sam_prompt import DetGeoSAMPrompt
@@ -35,6 +36,7 @@ from model.DetGeo_adaptive_gaussian_field import DetGeoAdaptiveGaussianField
 from model.DetGeo_b import DetGeoB
 from model.DetGeo_backbone_ablation import DetGeoBackboneAblation
 from model.DetGeo_single_scale_ca import DetGeoSingleScaleCA
+from model.TROGeo_wo_ost import TROGeoWoOST
 from model.loss import yolo_loss, build_target, adjust_learning_rate
 from utils.utils import AverageMeter, eval_iou_acc
 from utils.checkpoint import save_checkpoint, load_pretrain
@@ -125,6 +127,8 @@ def main():
                         default='baseline', help='pure original-P0 DetGeo backbone ablation')
     parser.add_argument('--single_scale_ca', action='store_true',
                         help='replace only original QACVFM with one spatial multi-head cross-attention block')
+    parser.add_argument('--trogeo_wo_ost', action='store_true',
+                        help='standalone TROGeo-style shared Swin-S + CVOPM detection reproduction without OST')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
     parser.add_argument('--sam_multimask_root', default='', help='optional root of split-indexed SAM multi-mask npz files')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
@@ -185,6 +189,14 @@ def main():
         parser.error('--single_scale_ca is a standalone original-DetGeo square-position experiment')
     if args.single_scale_ca and not args.standard_rng:
         parser.error('--single_scale_ca must use --standard_rng (ordinary RNG protocol)')
+    if args.trogeo_wo_ost and (args.backbone_exp != 'baseline' or args.single_scale_ca or args.b_variant != 'none'
+                               or args.sam_prompt or args.gaussian_only or args.adaptive_sam_prompt
+                               or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae
+                               or args.hisym_pae_inline_init or args.adaptive_gaussian_field
+                               or args.freeze_prompt_only):
+        parser.error('--trogeo_wo_ost is a standalone reproduction experiment')
+    if args.trogeo_wo_ost and not args.standard_rng:
+        parser.error('--trogeo_wo_ost must use --standard_rng (ordinary RNG protocol)')
     print('----------------------------------------------------------------------')
     print(sys.argv[0])
     print(args)
@@ -222,7 +234,10 @@ def main():
             std=[0.229, 0.224, 0.225])
     ])
 
-    if args.backbone_exp != 'baseline':
+    if args.trogeo_wo_ost:
+        dataset_class = TROGeoRSDataset
+        prompt_kwargs = {}
+    elif args.backbone_exp != 'baseline':
         # Backbone ablations retain the original square-position RSDataset.
         dataset_class = RSDataset
         prompt_kwargs = {}
@@ -270,8 +285,9 @@ def main():
         # Both retain DetGeo's ordinary DataLoader construction.
         # P10 deliberately reproduces DetGeo's original default DataLoader RNG.
         train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
-        val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
-        test_loader = DataLoader(test_dataset, shuffle=False, **loader_kwargs)
+        eval_loader_kwargs = dict(loader_kwargs, batch_size=args.batch_size * 2) if args.trogeo_wo_ost else loader_kwargs
+        val_loader = DataLoader(val_dataset, shuffle=False, **eval_loader_kwargs)
+        test_loader = DataLoader(test_dataset, shuffle=False, **eval_loader_kwargs)
     else:
         train_generator = torch.Generator()
         train_generator.manual_seed(args.loader_seed)
@@ -287,7 +303,9 @@ def main():
                                  worker_init_fn=seed_worker, **loader_kwargs)
     
     ## Model
-    if args.backbone_exp != 'baseline':
+    if args.trogeo_wo_ost:
+        model = TROGeoWoOST(emb_size=args.emb_size)
+    elif args.backbone_exp != 'baseline':
         model = DetGeoBackboneAblation(emb_size=args.emb_size, leaky=True, backbone_exp=args.backbone_exp)
     elif args.single_scale_ca:
         model = DetGeoSingleScaleCA(emb_size=args.emb_size, leaky=True)
@@ -347,7 +365,9 @@ def main():
     print('Num of parameters:', sum([param.nelement() for param in model.parameters()]))
     logging.info('Num of parameters:%d'%int(sum([param.nelement() for param in model.parameters()])))
 
-    if args.sam_prompt or args.adaptive_sam_prompt or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae or args.adaptive_gaussian_field:
+    if args.trogeo_wo_ost:
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
+    elif args.sam_prompt or args.adaptive_sam_prompt or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae or args.adaptive_gaussian_field:
         prompt_params, base_params = [], []
         for name, parameter in model.named_parameters():
             if not parameter.requires_grad:
@@ -370,7 +390,8 @@ def main():
             optimizer_groups.append({'params': prompt_params, 'lr': args.prompt_lr, 'base_lr': args.prompt_lr})
     else:
         optimizer_groups = [{'params': [p for p in model.parameters() if p.requires_grad], 'lr': args.lr, 'base_lr': args.lr}]
-    optimizer = torch.optim.RMSprop(optimizer_groups, weight_decay=0.0005)
+    if not args.trogeo_wo_ost:
+        optimizer = torch.optim.RMSprop(optimizer_groups, weight_decay=0.0005)
 
     if not args.original_rng_matched and not args.standard_rng:
         # P09: SAM creates extra PromptFusion parameters. Reset runtime RNG
