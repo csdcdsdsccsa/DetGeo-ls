@@ -1,10 +1,7 @@
 """Official TROGeo CVOPM attention blocks, ported for the w/o-OST ablation."""
 
-import math
-
 import torch
 import torch.nn.functional as F
-from einops import rearrange, repeat
 from torch import einsum, nn
 
 
@@ -57,15 +54,26 @@ class CrossAttention(nn.Module):
     def forward(self, x, context=None, mask=None):
         context = default(context, x)
         q, k, v = self.to_q(x), self.to_k(context), self.to_v(context)
-        q, k, v = map(lambda tensor: rearrange(tensor, 'b n (h d) -> (b h) n d', h=self.heads), (q, k, v))
+        batch, query_tokens, _ = q.shape
+        context_tokens = k.shape[1]
+        head_dim = q.shape[-1] // self.heads
+        def split_heads(tensor):
+            return tensor.view(batch, tensor.shape[1], self.heads, head_dim).permute(0, 2, 1, 3).reshape(
+                batch * self.heads, tensor.shape[1], head_dim
+            )
+        q, k, v = split_heads(q), split_heads(k), split_heads(v)
         similarity = einsum('b i d, b j d -> b i j', q, k) * self.scale
         if mask is not None:
-            mask = rearrange(mask, 'b ... -> b (...)')
-            mask = repeat(mask, 'b j -> (b h) () j', h=self.heads)
+            mask = mask.reshape(batch, -1)
+            mask = mask[:, None, None, :].expand(batch, self.heads, 1, context_tokens).reshape(
+                batch * self.heads, 1, context_tokens
+            )
             similarity.masked_fill_(~mask, -torch.finfo(similarity.dtype).max)
         attention = similarity.softmax(dim=-1)
         out = einsum('b i j, b j d -> b i d', attention, v)
-        out = rearrange(out, '(b h) n d -> b n (h d)', h=self.heads)
+        out = out.view(batch, self.heads, query_tokens, head_dim).permute(0, 2, 1, 3).reshape(
+            batch, query_tokens, self.heads * head_dim
+        )
         return self.to_out(out)
 
 
@@ -102,8 +110,8 @@ class SpatialTransformer(nn.Module):
         _, _, height, width = x.shape
         residual = x
         x = self.proj_in(self.norm(x))
-        x = rearrange(x, 'b c h w -> b (h w) c').contiguous()
+        x = x.flatten(2).transpose(1, 2).contiguous()
         for block in self.transformer_blocks:
             x = block(x, context=context)
-        x = rearrange(x, 'b (h w) c -> b c h w', h=height, w=width).contiguous()
+        x = x.transpose(1, 2).reshape(x.shape[0], x.shape[2], height, width).contiguous()
         return self.proj_out(x) + residual
