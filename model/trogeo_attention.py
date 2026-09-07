@@ -78,17 +78,24 @@ class CrossAttention(nn.Module):
 
 
 class BasicTransformerBlock(nn.Module):
-    def __init__(self, dim, n_heads, d_head, context_dim=None, dropout=0.0):
+    def __init__(self, dim, n_heads, d_head, context_dim=None, dropout=0.0, use_self_attention=True):
         super().__init__()
+        self.use_self_attention = use_self_attention
+        # Preserve the original construction order so all surviving modules
+        # receive the same initialization stream as full CVOPM.
         self.attn1 = CrossAttention(dim, heads=n_heads, dim_head=d_head, dropout=dropout)
         self.attn2 = CrossAttention(dim, context_dim=context_dim, heads=n_heads, dim_head=d_head, dropout=dropout)
         self.ff = FeedForward(dim, mult=4, dropout=dropout)
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
         self.norm3 = nn.LayerNorm(dim)
+        if not use_self_attention:
+            self.attn1 = None
+            self.norm1 = None
 
     def forward(self, x, context=None):
-        x = self.attn1(self.norm1(x)) + x
+        if self.use_self_attention:
+            x = self.attn1(self.norm1(x)) + x
         x = self.attn2(self.norm2(x), context=context) + x
         return self.ff(self.norm3(x)) + x
 
@@ -96,13 +103,15 @@ class BasicTransformerBlock(nn.Module):
 class SpatialTransformer(nn.Module):
     """TROGeo CVOPM: satellite self-attention then query-conditioned cross-attention."""
 
-    def __init__(self, in_channels, n_heads, d_head, depth=1, dropout=0.0, context_dim=None):
+    def __init__(self, in_channels, n_heads, d_head, depth=1, dropout=0.0, context_dim=None,
+                 use_self_attention=True):
         super().__init__()
         inner_dim = n_heads * d_head
         self.norm = normalize(in_channels)
         self.proj_in = nn.Conv2d(in_channels, inner_dim, kernel_size=1)
         self.transformer_blocks = nn.ModuleList(
-            [BasicTransformerBlock(inner_dim, n_heads, d_head, context_dim=context_dim, dropout=dropout) for _ in range(depth)]
+            [BasicTransformerBlock(inner_dim, n_heads, d_head, context_dim=context_dim, dropout=dropout,
+                                   use_self_attention=use_self_attention) for _ in range(depth)]
         )
         self.proj_out = zero_module(nn.Conv2d(inner_dim, in_channels, kernel_size=1))
 

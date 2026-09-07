@@ -28,13 +28,17 @@ def double_conv(in_channels, out_channels):
 class TROGeoWoOST(nn.Module):
     """TROGeo detection path only: shared Swin-S, CVOPM and 45-channel anchor head."""
 
-    def __init__(self, emb_size=768):
+    def __init__(self, emb_size=768, use_satellite_self_attention=True):
         super().__init__()
         if emb_size != 768:
             raise ValueError('TROGeoWoOST is fixed to the official emb_size=768')
         self.encoder = SwinFeatureEncoder()  # The single registered encoder is necessarily shared.
         self.position_embedding = double_conv(4, 3)
-        self.cvopm = SpatialTransformer(in_channels=768, n_heads=12, d_head=64, depth=1, context_dim=768)
+        self.use_satellite_self_attention = use_satellite_self_attention
+        self.cvopm = SpatialTransformer(
+            in_channels=768, n_heads=12, d_head=64, depth=1, context_dim=768,
+            use_self_attention=use_satellite_self_attention,
+        )
         self.det_head = nn.Sequential(
             nn.ConvTranspose2d(768, 384, kernel_size=4, stride=2, padding=1),
             nn.ReLU(inplace=True),
@@ -57,9 +61,11 @@ class TROGeoWoOST(nn.Module):
             raise RuntimeError('expected detector output [B,45,64,64], got {}'.format(tuple(outbox.shape)))
         if not self._logged_sanity:
             print(
-                '[TROGeo w/o OST sanity] shared_encoder=True query_input={} Fq={} Fr={} Fp={} outbox={} OST=False'.format(
-                    tuple(query_input.shape), tuple(query_features.shape), tuple(reference_features.shape),
-                    tuple(fused_features.shape), tuple(outbox.shape)
+                '[TROGeo {} sanity] shared_encoder=True satellite_self_attention={} cross_attention=True '
+                'Q=satellite KV=query query_input={} Fq={} Fr={} Fp={} outbox={} OST=False'.format(
+                    'w/o OST' if self.use_satellite_self_attention else 'Direct-CA',
+                    self.use_satellite_self_attention, tuple(query_input.shape), tuple(query_features.shape),
+                    tuple(reference_features.shape), tuple(fused_features.shape), tuple(outbox.shape)
                 ), flush=True,
             )
             self._logged_sanity = True
