@@ -11,10 +11,13 @@ from model.loss import build_target, yolo_loss
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, required=True)
+    parser.add_argument('--backbone', choices=('swin_s', 'swin_t', 'resnet50'), default='swin_s')
     args = parser.parse_args()
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    model = torch.nn.DataParallel(TROGeoWoOST(use_satellite_self_attention=False)).cuda().train()
+    model = torch.nn.DataParallel(
+        TROGeoWoOST(use_satellite_self_attention=False, backbone=args.backbone)
+    ).cuda().train()
     block = model.module.cvopm.transformer_blocks[0]
     assert block.attn1 is None and block.norm1 is None
     assert block.attn2 is not None
@@ -28,11 +31,15 @@ def main():
     click = torch.randn(batch, 256, 256, device='cuda')
     with torch.no_grad():
         query_input = model.module.position_embedding(torch.cat((query, click.unsqueeze(1)), dim=1))
-        query_features = model.module.encoder(query_input)
-        reference_features = model.module.encoder(reference)
+        query_raw_features, query_features = model.module.encoder(query_input)
+        reference_raw_features, reference_features = model.module.encoder(reference)
         context = query_features.flatten(2).transpose(1, 2)
         identity_output = model.module.cvopm(reference_features, context=context)
         identity_diff = (identity_output - reference_features).abs().max()
+        query_raw_shape = tuple(query_raw_features.shape)
+        query_shape = tuple(query_features.shape)
+        reference_raw_shape = tuple(reference_raw_features.shape)
+        reference_shape = tuple(reference_features.shape)
         q_shape = (batch, reference_features.shape[-2] * reference_features.shape[-1], reference_features.shape[1])
         kv_shape = tuple(context.shape)
     if identity_diff.item() != 0.0:
@@ -51,9 +58,11 @@ def main():
     loss.backward()
     if not torch.count_nonzero(model.module.cvopm.proj_out.weight.grad):
         raise RuntimeError('zero-init CVOPM proj_out did not receive a gradient')
-    print('trogeo_direct_ca batch={} loss={:.8f} params={} Q={} KV={} outbox={} identity_max_abs={} peak_mib={:.1f}'.format(
-        batch, loss.item(), sum(parameter.numel() for parameter in model.parameters()), q_shape, kv_shape,
-        tuple(outbox.shape), identity_diff.item(), torch.cuda.max_memory_allocated() / 1024 / 1024
+    print('trogeo_direct_ca backbone={} batch={} loss={:.8f} params={} Fq_raw={} Fq={} Fr_raw={} Fr={} Q={} KV={} '
+          'outbox={} identity_max_abs={} peak_mib={:.1f}'.format(
+        args.backbone, batch, loss.item(), sum(parameter.numel() for parameter in model.parameters()),
+        query_raw_shape, query_shape, reference_raw_shape, reference_shape, q_shape, kv_shape, tuple(outbox.shape), identity_diff.item(),
+        torch.cuda.max_memory_allocated() / 1024 / 1024
     ))
 
 

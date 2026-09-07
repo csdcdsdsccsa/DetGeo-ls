@@ -131,6 +131,8 @@ def main():
                         help='standalone TROGeo-style shared Swin-S + CVOPM detection reproduction without OST')
     parser.add_argument('--trogeo_direct_ca', action='store_true',
                         help='TROGeo w/o OST with satellite self-attention removed; direct satellite-query cross-attention only')
+    parser.add_argument('--trogeo_backbone', choices=('swin_s', 'swin_t', 'resnet50'), default='swin_s',
+                        help='shared ImageNet backbone for TROGeo modes')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
     parser.add_argument('--sam_multimask_root', default='', help='optional root of split-indexed SAM multi-mask npz files')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
@@ -194,6 +196,8 @@ def main():
     if args.trogeo_wo_ost and args.trogeo_direct_ca:
         parser.error('--trogeo_wo_ost and --trogeo_direct_ca are mutually exclusive')
     trogeo_mode = args.trogeo_wo_ost or args.trogeo_direct_ca
+    if not trogeo_mode and args.trogeo_backbone != 'swin_s':
+        parser.error('--trogeo_backbone is only valid for a TROGeo mode')
     if trogeo_mode and (args.backbone_exp != 'baseline' or args.single_scale_ca or args.b_variant != 'none'
                                or args.sam_prompt or args.gaussian_only or args.adaptive_sam_prompt
                                or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae
@@ -309,9 +313,11 @@ def main():
     
     ## Model
     if args.trogeo_wo_ost:
-        model = TROGeoWoOST(emb_size=args.emb_size, use_satellite_self_attention=True)
+        model = TROGeoWoOST(emb_size=args.emb_size, use_satellite_self_attention=True,
+                             backbone=args.trogeo_backbone)
     elif args.trogeo_direct_ca:
-        model = TROGeoWoOST(emb_size=args.emb_size, use_satellite_self_attention=False)
+        model = TROGeoWoOST(emb_size=args.emb_size, use_satellite_self_attention=False,
+                             backbone=args.trogeo_backbone)
     elif args.backbone_exp != 'baseline':
         model = DetGeoBackboneAblation(emb_size=args.emb_size, leaky=True, backbone_exp=args.backbone_exp)
     elif args.single_scale_ca:
