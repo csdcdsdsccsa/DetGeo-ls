@@ -24,9 +24,12 @@ def main():
         query_input = model.module.position_embedding(torch.cat((query, click.unsqueeze(1)), dim=1))
         query_features = model.module.encoder(query_input)
         reference_features = model.module.encoder(reference)
-        identity_diff = (model.module.cvopm(reference_features, context=query_features.flatten(2).transpose(1, 2)) - reference_features).abs().max()
+        identity_output = model.module.cvopm(reference_features, context=query_features.flatten(2).transpose(1, 2))
+        identity_diff = (identity_output - reference_features).abs().max()
     if identity_diff.item() != 0.0:
         raise RuntimeError('CVOPM zero-init residual check failed: {}'.format(identity_diff.item()))
+    del query_input, query_features, reference_features, identity_output
+    torch.cuda.empty_cache()
     outbox, _ = model(query, reference, click)
     predictions = outbox.view(batch, 9, 5, 64, 64)
     anchors = torch.tensor([[550, 573], [395, 342], [246, 280], [198, 179], [194, 82], [129, 129], [96, 215], [78, 84], [37, 41]], dtype=torch.float32, device='cuda')
