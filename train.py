@@ -34,6 +34,7 @@ from dataset.adaptive_gaussian_field_loader import AdaptiveGaussianFieldDataset
 from model.DetGeo_adaptive_gaussian_field import DetGeoAdaptiveGaussianField
 from model.DetGeo_b import DetGeoB
 from model.DetGeo_backbone_ablation import DetGeoBackboneAblation
+from model.DetGeo_single_scale_ca import DetGeoSingleScaleCA
 from model.loss import yolo_loss, build_target, adjust_learning_rate
 from utils.utils import AverageMeter, eval_iou_acc
 from utils.checkpoint import save_checkpoint, load_pretrain
@@ -122,6 +123,8 @@ def main():
     parser.add_argument('--b_ffn_dim', type=int, default=1024, help='attention FFN width for DetGeoB')
     parser.add_argument('--backbone_exp', choices=('baseline', 'darknet53_noshare', 'darknet53_shared', 'resnet50_shared'),
                         default='baseline', help='pure original-P0 DetGeo backbone ablation')
+    parser.add_argument('--single_scale_ca', action='store_true',
+                        help='replace only original QACVFM with one spatial multi-head cross-attention block')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
     parser.add_argument('--sam_multimask_root', default='', help='optional root of split-indexed SAM multi-mask npz files')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
@@ -174,6 +177,14 @@ def main():
                                              or args.adaptive_sam_prompt or args.sam_refined_pe or args.rgbp_interaction
                                              or args.hisym_pae or args.hisym_pae_inline_init or args.adaptive_gaussian_field):
         parser.error('--backbone_exp must use only original DetGeo square positional encoding')
+    if args.single_scale_ca and (args.backbone_exp != 'baseline' or args.b_variant != 'none'
+                                 or args.sam_prompt or args.gaussian_only or args.adaptive_sam_prompt
+                                 or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae
+                                 or args.hisym_pae_inline_init or args.adaptive_gaussian_field
+                                 or args.freeze_prompt_only):
+        parser.error('--single_scale_ca is a standalone original-DetGeo square-position experiment')
+    if args.single_scale_ca and not args.standard_rng:
+        parser.error('--single_scale_ca must use --standard_rng (ordinary RNG protocol)')
     print('----------------------------------------------------------------------')
     print(sys.argv[0])
     print(args)
@@ -278,6 +289,8 @@ def main():
     ## Model
     if args.backbone_exp != 'baseline':
         model = DetGeoBackboneAblation(emb_size=args.emb_size, leaky=True, backbone_exp=args.backbone_exp)
+    elif args.single_scale_ca:
+        model = DetGeoSingleScaleCA(emb_size=args.emb_size, leaky=True)
     elif args.b_variant != 'none':
         model = DetGeoB(emb_size=args.emb_size, leaky=True, variant=args.b_variant,
                          num_tokens=args.b_num_tokens, num_heads=args.b_num_heads, ffn_dim=args.b_ffn_dim)
