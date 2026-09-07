@@ -40,8 +40,10 @@ def main():
     if not torch.isfinite(loss):
         raise RuntimeError('non-finite detection loss')
     loss.backward()
-    if not torch.count_nonzero(model.module.cvopm.transformer_blocks[0].attn1.to_q.weight.grad):
-        raise RuntimeError('CVOPM gradient is zero')
+    # The official zero-initialized proj_out blocks gradients to the inner
+    # transformer on step zero; proj_out itself must receive the first update.
+    if not torch.count_nonzero(model.module.cvopm.proj_out.weight.grad):
+        raise RuntimeError('zero-init CVOPM proj_out did not receive a gradient')
     print('trogeo_wo_ost batch={} loss={:.8f} total_params={} cvopm_identity_max_abs={} peak_mib={:.1f}'.format(
         batch, loss.item(), sum(parameter.numel() for parameter in model.parameters()), identity_diff.item(),
         torch.cuda.max_memory_allocated() / 1024 / 1024
