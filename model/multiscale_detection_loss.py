@@ -51,3 +51,14 @@ def three_head_yolo_loss(pred2, pred3, pred4, ori_gt_bboxes, anchors_full, image
     geo3, cls3 = yolo_loss(pred3, target, anchors_full, best, image_wh)
     geo4, cls4 = yolo_loss(pred4, target, anchors_full, best, image_wh)
     return (geo2 + geo3 + geo4) / 3.0, (cls2 + cls3 + cls4) / 3.0
+
+
+def three_head_yolo_loss_stage2_cls_half(pred2, pred3, pred4, ori_gt_bboxes, anchors_full, image_wh):
+    """E8: retain equal geometry supervision but downweight Stage2 confidence to 0.5."""
+    target, best = build_target(ori_gt_bboxes, anchors_full, image_wh, 64)
+    geo2, cls2 = yolo_loss(pred2, target, anchors_full, best, image_wh)
+    geo3, cls3 = yolo_loss(pred3, target, anchors_full, best, image_wh)
+    geo4, cls4 = yolo_loss(pred4, target, anchors_full, best, image_wh)
+    loss_geo = (geo2 + geo3 + geo4) / 3.0
+    loss_cls = (0.5 * cls2 + cls3 + cls4) / 2.5
+    return loss_geo, loss_cls

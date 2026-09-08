@@ -30,19 +30,20 @@ class SwinTThreeStageEncoder(nn.Module):
 
 
 class TROGeoMSDetectionAblation(nn.Module):
-    """E1--E7 heads; E7 expands independent Direct-CA from two to three scales."""
+    """E1--E8 heads; E7/E8 expand independent Direct-CA to three scales."""
 
     VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive',
-                      'h2_ind_3scale')
+                      'h2_ind_3scale', 'h2_ind_3scale_stage2cls05')
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63'):
         super().__init__()
         if emb_size != 768 or backbone != 'swin_t' or variant not in self.VALID_VARIANTS:
             raise ValueError('requires emb_size=768, backbone=swin_t, and a valid MS variant')
         self.variant = variant
-        self.encoder = SwinTThreeStageEncoder() if variant == 'h2_ind_3scale' else SwinTMultiStageEncoder()
+        self.three_scale = variant in ('h2_ind_3scale', 'h2_ind_3scale_stage2cls05')
+        self.encoder = SwinTThreeStageEncoder() if self.three_scale else SwinTMultiStageEncoder()
         self.position_embedding = double_conv(4, 3)
-        if variant == 'h2_ind_3scale':
+        if self.three_scale:
             self.cvopm_stage2 = SpatialTransformer(192, 3, 64, depth=1, context_dim=192,
                                                     use_self_attention=False, query_chunk_size=512)
         self.cvopm_stage3 = SpatialTransformer(384, 6, 64, depth=1, context_dim=384,
@@ -74,7 +75,7 @@ class TROGeoMSDetectionAblation(nn.Module):
             else:  # H2/H3 variants deliberately share the independent-head state layout.
                 self.det_head_stage3 = nn.Conv2d(384, 45, kernel_size=1)
                 self.det_head_stage4 = nn.Conv2d(384, 45, kernel_size=1)
-                if variant == 'h2_ind_3scale':
+                if self.three_scale:
                     self.stage2_align = nn.Sequential(
                         nn.Conv2d(192, 384, kernel_size=3, stride=2, padding=1),
                         nn.ReLU(inplace=True),
@@ -89,7 +90,7 @@ class TROGeoMSDetectionAblation(nn.Module):
 
     def forward(self, query_imgs, reference_imgs, click_map):
         query_input = self.position_embedding(torch.cat((query_imgs, click_map.unsqueeze(1)), dim=1))
-        if self.variant == 'h2_ind_3scale':
+        if self.three_scale:
             q2, q3, q4 = self.encoder(query_input)
             r2, r3, r4 = self.encoder(reference_imgs)
             self._expect('query stage2', q2, 192, 32, 32)
@@ -105,7 +106,7 @@ class TROGeoMSDetectionAblation(nn.Module):
         z3 = self.cvopm_stage3(r3, context=q3.flatten(2).transpose(1, 2).contiguous())
         z4 = self.cvopm_stage4(r4, context=q4.flatten(2).transpose(1, 2).contiguous())
 
-        if self.variant == 'h2_ind_3scale':
+        if self.three_scale:
             p2 = self.det_head_stage2(self.stage2_align(z2))
             p3 = self.det_head_stage3(z3)
             p4 = self.det_head_stage4(self.stage4_align(z4))
@@ -137,7 +138,7 @@ class TROGeoMSDetectionAblation(nn.Module):
 
         if not self._logged_sanity:
             shapes = {name: tuple(value.shape) for name, value in predictions.items()}
-            if self.variant == 'h2_ind_3scale':
+            if self.three_scale:
                 print('[TROGeo MS detection sanity] variant={} shared_encoder=True '
                       'self_attention_stage2=False self_attention_stage3=False self_attention_stage4=False '
                       'stage2_query_chunk=512 q2={} q3={} q4={} r2={} r3={} r4={} z2={} z3={} z4={} '
