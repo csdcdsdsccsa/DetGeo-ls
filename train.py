@@ -38,8 +38,11 @@ from model.DetGeo_backbone_ablation import DetGeoBackboneAblation
 from model.DetGeo_single_scale_ca import DetGeoSingleScaleCA
 from model.TROGeo_wo_ost import TROGeoWoOST
 from model.TROGeo_ms_direct_ca_sh import TROGeoMSDirectCASH
+from model.TROGeo_ms_detection_ablation import TROGeoMSDetectionAblation
 from model.loss import yolo_loss, build_target, adjust_learning_rate
+from model.multiscale_detection_loss import multigrid_yolo_loss, two_head_yolo_loss
 from utils.utils import AverageMeter, eval_iou_acc
+from utils.multiscale_detection import decode_multigrid_top1, select_two_heads, eval_decoded_boxes
 from utils.checkpoint import save_checkpoint, load_pretrain
 
 
@@ -134,6 +137,8 @@ def main():
                         help='TROGeo w/o OST with satellite self-attention removed; direct satellite-query cross-attention only')
     parser.add_argument('--trogeo_ms_direct_ca_sh', action='store_true',
                         help='Swin-T stage3/stage4 Direct-CA with separate 6/3-anchor heads and no feature fusion')
+    parser.add_argument('--trogeo_ms_det_variant', choices=('none', 'correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind'),
+                        default='none', help='controlled Swin-T multi-scale detection ablation')
     parser.add_argument('--trogeo_backbone', choices=('swin_s', 'swin_t', 'resnet50'), default='swin_s',
                         help='shared ImageNet backbone for TROGeo modes')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
@@ -196,12 +201,17 @@ def main():
         parser.error('--single_scale_ca is a standalone original-DetGeo square-position experiment')
     if args.single_scale_ca and not args.standard_rng:
         parser.error('--single_scale_ca must use --standard_rng (ordinary RNG protocol)')
-    trogeo_experiments = (args.trogeo_wo_ost, args.trogeo_direct_ca, args.trogeo_ms_direct_ca_sh)
+    trogeo_experiments = (args.trogeo_wo_ost, args.trogeo_direct_ca, args.trogeo_ms_direct_ca_sh,
+                          args.trogeo_ms_det_variant != 'none')
     if sum(trogeo_experiments) > 1:
         parser.error('TROGeo experiment modes are mutually exclusive')
     trogeo_mode = any(trogeo_experiments)
     if args.trogeo_ms_direct_ca_sh and args.trogeo_backbone != 'swin_t':
         parser.error('--trogeo_ms_direct_ca_sh currently requires --trogeo_backbone swin_t')
+    if args.trogeo_ms_det_variant != 'none' and args.trogeo_backbone != 'swin_t':
+        parser.error('--trogeo_ms_det_variant requires --trogeo_backbone swin_t')
+    if args.trogeo_ms_det_variant == 'h3_ind' and not (args.test or args.val):
+        parser.error('h3_ind is inference-only: train h2_ind then evaluate its best checkpoint with h3_ind')
     if not trogeo_mode and args.trogeo_backbone != 'swin_s':
         parser.error('--trogeo_backbone is only valid for a TROGeo mode')
     if trogeo_mode and (args.backbone_exp != 'baseline' or args.single_scale_ca or args.b_variant != 'none'
@@ -326,6 +336,9 @@ def main():
                              backbone=args.trogeo_backbone)
     elif args.trogeo_ms_direct_ca_sh:
         model = TROGeoMSDirectCASH(emb_size=args.emb_size, backbone=args.trogeo_backbone)
+    elif args.trogeo_ms_det_variant != 'none':
+        model = TROGeoMSDetectionAblation(emb_size=args.emb_size, backbone=args.trogeo_backbone,
+                                           variant=args.trogeo_ms_det_variant)
     elif args.backbone_exp != 'baseline':
         model = DetGeoBackboneAblation(emb_size=args.emb_size, leaky=True, backbone_exp=args.backbone_exp)
     elif args.single_scale_ca:
@@ -480,6 +493,44 @@ def forward_model(model, query_imgs, rs_imgs, original_click_map, prompt_maps):
     return model(query_imgs, rs_imgs, original_click_map)
 
 
+def is_ms_detection_variant(args):
+    return args.trogeo_ms_det_variant != 'none'
+
+
+def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, include_loss=True):
+    """Return decoded final boxes and, during training, the matching loss terms."""
+    variant = args.trogeo_ms_det_variant
+    if variant == 'correct63':
+        joint = predictions['joint'].view(predictions['joint'].shape[0], 9, 5, 64, 64)
+        target, best = build_target(ori_gt_bbox, anchors_full, args.img_size, 64)
+        if include_loss:
+            loss_geo, loss_cls = yolo_loss(joint, target, anchors_full, best, args.img_size)
+        else:
+            loss_geo = loss_cls = None
+        _, _, _, _, final_box, _ = eval_iou_acc(joint, ori_gt_bbox, anchors_full, best[:, 1], best[:, 2],
+                                                 args.img_size, iou_threshold_list=[0.5])
+        diagnostics = {}
+    elif variant == 'b_multigrid':
+        p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 6, 5, 64, 64)
+        p4 = predictions['stage4'].view(predictions['stage4'].shape[0], 3, 5, 32, 32)
+        if include_loss:
+            loss_geo, loss_cls = multigrid_yolo_loss(p3, p4, ori_gt_bbox, anchors_full, args.img_size)
+        else:
+            loss_geo = loss_cls = None
+        final_box = decode_multigrid_top1(p3, p4, anchors_full, args.img_size)
+        diagnostics = {}
+    else:
+        p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)
+        p4 = predictions['stage4'].view(predictions['stage4'].shape[0], 9, 5, 64, 64)
+        if include_loss:
+            loss_geo, loss_cls = two_head_yolo_loss(p3, p4, ori_gt_bbox, anchors_full, args.img_size)
+        else:
+            loss_geo = loss_cls = None
+        final_box, diagnostics = select_two_heads(p3, p4, anchors_full, args.img_size,
+                                                  fusion=(variant == 'h3_ind'))
+    return loss_geo, loss_cls, final_box, diagnostics
+
+
 def train_epoch(train_loader, model, optimizer, epoch, args):
     batch_time = AverageMeter()
     avg_losses = AverageMeter()
@@ -524,14 +575,19 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
         ori_gt_bbox = ori_gt_bbox.cuda()
         ori_gt_bbox = torch.clamp(ori_gt_bbox, min=0, max=args.img_size-1)
 
-        pred_anchor, _ = forward_model(model, query_imgs, rs_imgs, mat_clickxy, prompt_maps)
-        pred_anchor = pred_anchor.view(pred_anchor.shape[0], 9, 5, pred_anchor.shape[2], pred_anchor.shape[3])
-        
-        ## convert gt box to center+offset format
-        new_gt_bbox, best_anchor_gi_gj = build_target(ori_gt_bbox, anchors_full, args.img_size, pred_anchor.shape[3])
-        
-        # loss
-        loss_geo, loss_cls = yolo_loss(pred_anchor, new_gt_bbox, anchors_full, best_anchor_gi_gj, args.img_size)
+        prediction_output, _ = forward_model(model, query_imgs, rs_imgs, mat_clickxy, prompt_maps)
+        if is_ms_detection_variant(args):
+            loss_geo, loss_cls, final_box, _ = _ms_predictions_and_loss(
+                prediction_output, ori_gt_bbox, anchors_full, args, include_loss=True)
+            accu, _, iou, accu_center = eval_decoded_boxes(final_box, ori_gt_bbox, args.img_size)
+        else:
+            pred_anchor = prediction_output.view(prediction_output.shape[0], 9, 5,
+                                                 prediction_output.shape[2], prediction_output.shape[3])
+            new_gt_bbox, best_anchor_gi_gj = build_target(ori_gt_bbox, anchors_full, args.img_size, pred_anchor.shape[3])
+            loss_geo, loss_cls = yolo_loss(pred_anchor, new_gt_bbox, anchors_full, best_anchor_gi_gj, args.img_size)
+            accu_list, accu_center, iou, _, _, _ = eval_iou_acc(pred_anchor, ori_gt_bbox, anchors_full,
+                best_anchor_gi_gj[:, 1], best_anchor_gi_gj[:, 2], args.img_size, iou_threshold_list=[0.5])
+            accu = accu_list[0]
         loss = loss_cls + loss_geo * args.beta
 
         optimizer.zero_grad()
@@ -542,8 +598,6 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
         avg_geo_losses.update(loss_geo.item(), query_imgs.shape[0])
         avg_cls_losses.update(loss_cls.item(), query_imgs.shape[0])
         
-        accu_list, accu_center, iou, _, _, _ = eval_iou_acc(pred_anchor, ori_gt_bbox, anchors_full, best_anchor_gi_gj[:, 1], best_anchor_gi_gj[:, 2], args.img_size, iou_threshold_list=[0.5])
-        accu = accu_list[0]
         ## metrics
         avg_iou.update(iou, query_imgs.shape[0])
         avg_accu.update(accu, query_imgs.shape[0])
@@ -592,13 +646,18 @@ def test_epoch(data_loader, model, args):
         ori_gt_bbox = torch.clamp(ori_gt_bbox, min=0, max=args.img_size-1)
 
         with torch.no_grad():
-            pred_anchor, attn_score = forward_model(model, query_imgs, rs_imgs, mat_clickxy, prompt_maps)
-        pred_anchor = pred_anchor.view(pred_anchor.shape[0],\
-            9, 5, pred_anchor.shape[2], pred_anchor.shape[3])
-        
-        _, best_anchor_gi_gj = build_target(ori_gt_bbox, anchors_full, args.img_size, pred_anchor.shape[3])
-        
-        accu_list, accu_center, iou, each_acc_list, _, _ = eval_iou_acc(pred_anchor, ori_gt_bbox, anchors_full, best_anchor_gi_gj[:, 1], best_anchor_gi_gj[:, 2], args.img_size, iou_threshold_list=[0.5, 0.25])
+            prediction_output, attn_score = forward_model(model, query_imgs, rs_imgs, mat_clickxy, prompt_maps)
+            if is_ms_detection_variant(args):
+                _, _, final_box, diagnostics = _ms_predictions_and_loss(
+                    prediction_output, ori_gt_bbox, anchors_full, args, include_loss=False)
+                accu50, accu25, iou, accu_center = eval_decoded_boxes(final_box, ori_gt_bbox, args.img_size)
+                accu_list = [accu50, accu25]
+            else:
+                pred_anchor = prediction_output.view(prediction_output.shape[0], 9, 5,
+                    prediction_output.shape[2], prediction_output.shape[3])
+                _, best_anchor_gi_gj = build_target(ori_gt_bbox, anchors_full, args.img_size, pred_anchor.shape[3])
+                accu_list, accu_center, iou, _, _, _ = eval_iou_acc(pred_anchor, ori_gt_bbox, anchors_full,
+                    best_anchor_gi_gj[:, 1], best_anchor_gi_gj[:, 2], args.img_size, iou_threshold_list=[0.5, 0.25])
         
         avg_accu50.update(accu_list[0], query_imgs.shape[0])
         avg_accu25.update(accu_list[1], query_imgs.shape[0])

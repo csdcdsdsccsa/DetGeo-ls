@@ -284,3 +284,16 @@
 - Validation-selected checkpoint: validation =
   60.24%/64.46%/47.64%/27.52%; final single test (workers 16) =
   61.25%/66.80%/49.40%/31.86%.
+# TROGeo multi-scale detection ablation (planned sequential execution)
+
+All five entries retain the shared Swin-T, square click encoding, two Direct-CA
+blocks without satellite self-attention, Adam, 25 epochs, batch 7, workers 24,
+lr 1e-4, seed 2024, and ordinary `--standard_rng`.
+
+| ID | CLI variant | Detector definition | Training / decode |
+|---|---|---|---|
+| E1 | `correct63` | Correct reversed-anchor 6/3: Stage4 A0-A2 then Stage3 A3-A8 | original 9-anchor loss / Top-1 |
+| E2 | `b_multigrid` | Stage3 6 anchors at 64x64; Stage4 3 anchors at native 32x32 | global multi-grid loss / global Top-1 |
+| E3 | `h2_shared` | two full 9-anchor heads with shared 384-to-45 predictor | mean two-head loss / softmax-score selection |
+| E4 | `h2_ind` | two full 9-anchor heads with independent predictors | mean two-head loss / softmax-score selection |
+| E5 | `h3_ind` | exact E4 state dict | no training; H3 IoU>=0.5 score-weighted fusion |
