@@ -139,6 +139,8 @@ def main():
                         help='Swin-T stage3/stage4 Direct-CA with separate 6/3-anchor heads and no feature fusion')
     parser.add_argument('--trogeo_ms_det_variant', choices=('none', 'correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind'),
                         default='none', help='controlled Swin-T multi-scale detection ablation')
+    parser.add_argument('--h3_iou_threshold', default=0.5, type=float,
+                        help='H3: fuse two Top-1 boxes only when their pair IoU reaches this threshold')
     parser.add_argument('--trogeo_backbone', choices=('swin_s', 'swin_t', 'resnet50'), default='swin_s',
                         help='shared ImageNet backbone for TROGeo modes')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
@@ -212,6 +214,8 @@ def main():
         parser.error('--trogeo_ms_det_variant requires --trogeo_backbone swin_t')
     if args.trogeo_ms_det_variant == 'h3_ind' and not (args.test or args.val):
         parser.error('h3_ind is inference-only: train h2_ind then evaluate its best checkpoint with h3_ind')
+    if not 0.0 <= args.h3_iou_threshold <= 1.0:
+        parser.error('--h3_iou_threshold must be in [0, 1]')
     if not trogeo_mode and args.trogeo_backbone != 'swin_s':
         parser.error('--trogeo_backbone is only valid for a TROGeo mode')
     if trogeo_mode and (args.backbone_exp != 'baseline' or args.single_scale_ca or args.b_variant != 'none'
@@ -527,7 +531,8 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
         else:
             loss_geo = loss_cls = None
         final_box, diagnostics = select_two_heads(p3, p4, anchors_full, args.img_size,
-                                                  fusion=(variant == 'h3_ind'))
+                                                  fusion=(variant == 'h3_ind'),
+                                                  iou_threshold=args.h3_iou_threshold)
     return loss_geo, loss_cls, final_box, diagnostics
 
 
@@ -628,6 +633,7 @@ def test_epoch(data_loader, model, args):
     avg_accu25 = AverageMeter()
     avg_iou = AverageMeter()
     avg_accu_center = AverageMeter()
+    diagnostic_meters = {}
     
     torch.cuda.empty_cache()
     model.eval()
@@ -652,6 +658,8 @@ def test_epoch(data_loader, model, args):
                     prediction_output, ori_gt_bbox, anchors_full, args, include_loss=False)
                 accu50, accu25, iou, accu_center = eval_decoded_boxes(final_box, ori_gt_bbox, args.img_size)
                 accu_list = [accu50, accu25]
+                for name, value in diagnostics.items():
+                    diagnostic_meters.setdefault(name, AverageMeter()).update(float(value), query_imgs.shape[0])
             else:
                 pred_anchor = prediction_output.view(prediction_output.shape[0], 9, 5,
                     prediction_output.shape[2], prediction_output.shape[3])
@@ -682,6 +690,12 @@ def test_epoch(data_loader, model, args):
             logging.info(print_str)
     print(avg_accu50.avg, avg_accu25.avg, avg_iou.avg, avg_accu_center.avg)
     logging.info("%f, %f, %f, %f" % (avg_accu50.avg, avg_accu25.avg, float(avg_iou.avg), avg_accu_center.avg))
+    if diagnostic_meters:
+        diagnostic_text = 'MS decode diagnostics: ' + ', '.join(
+            '{}={:.6f}'.format(name, meter.avg) for name, meter in sorted(diagnostic_meters.items())
+        )
+        print(diagnostic_text)
+        logging.info(diagnostic_text)
 
     return avg_accu50.avg
 

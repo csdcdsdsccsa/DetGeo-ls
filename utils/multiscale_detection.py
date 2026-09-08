@@ -4,9 +4,6 @@ import torch
 
 from .utils import bbox_iou, xywh2xyxy
 
-H3_IOU_THRESHOLD = 0.5
-
-
 def decode_top1(prediction, anchors, image_wh):
     """Decode the highest-confidence candidate in one [B,A,5,G,G] head."""
     batch, _, _, grid, _ = prediction.shape
@@ -57,18 +54,22 @@ def decode_multigrid_top1(pred3, pred4, anchors, image_wh):
     return torch.where(use3[:, None], box3, box4)
 
 
-def select_two_heads(pred3, pred4, anchors, image_wh, fusion=False):
+def select_two_heads(pred3, pred4, anchors, image_wh, fusion=False, iou_threshold=0.5):
+    """Choose H2 or fuse H3 boxes when their pair IoU reaches ``iou_threshold``."""
+    if not 0.0 <= iou_threshold <= 1.0:
+        raise ValueError('iou_threshold must be in [0, 1]')
     box3, score3 = decode_top1(pred3, anchors, image_wh)
     box4, score4 = decode_top1(pred4, anchors, image_wh)
     use3 = score3 >= score4
     selected = torch.where(use3[:, None], box3, box4)
     pair_iou = bbox_iou(box3, box4, x1y1x2y2=True)
+    fusion_mask = pair_iou.ge(iou_threshold)
     diagnostics = {'stage3_selected': use3.float().mean(), 'stage4_selected': (~use3).float().mean(),
-                   'pair_iou': pair_iou.mean(), 'fusion_ratio': pair_iou.ge(H3_IOU_THRESHOLD).float().mean()}
+                   'pair_iou': pair_iou.mean(), 'fusion_ratio': fusion_mask.float().mean()}
     if fusion:
         weight3 = score3 / (score3 + score4 + 1e-12)
         fused = weight3[:, None] * box3 + (1.0 - weight3)[:, None] * box4
-        selected = torch.where(pair_iou.ge(H3_IOU_THRESHOLD)[:, None], fused, selected)
+        selected = torch.where(fusion_mask[:, None], fused, selected)
     return selected, diagnostics
 
 
