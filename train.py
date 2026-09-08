@@ -40,9 +40,9 @@ from model.TROGeo_wo_ost import TROGeoWoOST
 from model.TROGeo_ms_direct_ca_sh import TROGeoMSDirectCASH
 from model.TROGeo_ms_detection_ablation import TROGeoMSDetectionAblation
 from model.loss import yolo_loss, build_target, adjust_learning_rate
-from model.multiscale_detection_loss import multigrid_yolo_loss, two_head_yolo_loss
+from model.multiscale_detection_loss import multigrid_yolo_loss, two_head_yolo_loss, three_head_yolo_loss
 from utils.utils import AverageMeter, eval_iou_acc
-from utils.multiscale_detection import decode_multigrid_top1, select_two_heads, eval_decoded_boxes
+from utils.multiscale_detection import decode_multigrid_top1, select_two_heads, select_three_heads, eval_decoded_boxes
 from utils.checkpoint import save_checkpoint, load_pretrain
 
 
@@ -137,7 +137,7 @@ def main():
                         help='TROGeo w/o OST with satellite self-attention removed; direct satellite-query cross-attention only')
     parser.add_argument('--trogeo_ms_direct_ca_sh', action='store_true',
                         help='Swin-T stage3/stage4 Direct-CA with separate 6/3-anchor heads and no feature fusion')
-    parser.add_argument('--trogeo_ms_det_variant', choices=('none', 'correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive'),
+    parser.add_argument('--trogeo_ms_det_variant', choices=('none', 'correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive', 'h2_ind_3scale'),
                         default='none', help='controlled Swin-T multi-scale detection ablation')
     parser.add_argument('--h3_iou_threshold', default=0.5, type=float,
                         help='H3: fuse two Top-1 boxes only when their pair IoU reaches this threshold')
@@ -504,7 +504,16 @@ def is_ms_detection_variant(args):
 def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, include_loss=True):
     """Return decoded final boxes and, during training, the matching loss terms."""
     variant = args.trogeo_ms_det_variant
-    if variant == 'correct63':
+    if variant == 'h2_ind_3scale':
+        p2 = predictions['stage2'].view(predictions['stage2'].shape[0], 9, 5, 64, 64)
+        p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)
+        p4 = predictions['stage4'].view(predictions['stage4'].shape[0], 9, 5, 64, 64)
+        if include_loss:
+            loss_geo, loss_cls = three_head_yolo_loss(p2, p3, p4, ori_gt_bbox, anchors_full, args.img_size)
+        else:
+            loss_geo = loss_cls = None
+        final_box, diagnostics = select_three_heads(p2, p3, p4, anchors_full, args.img_size)
+    elif variant == 'correct63':
         joint = predictions['joint'].view(predictions['joint'].shape[0], 9, 5, 64, 64)
         target, best = build_target(ori_gt_bbox, anchors_full, args.img_size, 64)
         if include_loss:

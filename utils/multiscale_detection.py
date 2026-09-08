@@ -90,6 +90,23 @@ def select_two_heads(pred3, pred4, anchors, image_wh, fusion=False, iou_threshol
     return selected, diagnostics
 
 
+def select_three_heads(pred2, pred3, pred4, anchors, image_wh):
+    """E7: extend E4 winner-takes-all decoding from two heads to three heads."""
+    box2, score2 = decode_top1(pred2, anchors, image_wh)
+    box3, score3 = decode_top1(pred3, anchors, image_wh)
+    box4, score4 = decode_top1(pred4, anchors, image_wh)
+    scores = torch.stack((score2, score3, score4), dim=1)
+    best_head = scores.argmax(dim=1)
+    boxes = torch.stack((box2, box3, box4), dim=1)
+    selected = boxes[torch.arange(boxes.shape[0], device=boxes.device), best_head]
+    diagnostics = {
+        'stage2_selected': best_head.eq(0).float().mean(),
+        'stage3_selected': best_head.eq(1).float().mean(),
+        'stage4_selected': best_head.eq(2).float().mean(),
+    }
+    return selected, diagnostics
+
+
 def eval_decoded_boxes(pred_bbox, target_bbox, image_wh):
     iou = bbox_iou(pred_bbox, target_bbox, x1y1x2y2=True)
     pred_center = (pred_bbox[:, :2] + pred_bbox[:, 2:4]) * 0.5

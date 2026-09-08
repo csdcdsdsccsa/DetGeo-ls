@@ -42,3 +42,12 @@ def two_head_yolo_loss(pred3, pred4, ori_gt_bboxes, anchors_full, image_wh):
     geo3, cls3 = yolo_loss(pred3, target, anchors_full, best, image_wh)
     geo4, cls4 = yolo_loss(pred4, target, anchors_full, best, image_wh)
     return 0.5 * (geo3 + geo4), 0.5 * (cls3 + cls4)
+
+
+def three_head_yolo_loss(pred2, pred3, pred4, ori_gt_bboxes, anchors_full, image_wh):
+    """E7: every independent 9-anchor head receives the same 64x64 target."""
+    target, best = build_target(ori_gt_bboxes, anchors_full, image_wh, 64)
+    geo2, cls2 = yolo_loss(pred2, target, anchors_full, best, image_wh)
+    geo3, cls3 = yolo_loss(pred3, target, anchors_full, best, image_wh)
+    geo4, cls4 = yolo_loss(pred4, target, anchors_full, best, image_wh)
+    return (geo2 + geo3 + geo4) / 3.0, (cls2 + cls3 + cls4) / 3.0
