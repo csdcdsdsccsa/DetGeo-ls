@@ -37,6 +37,7 @@ from model.DetGeo_b import DetGeoB
 from model.DetGeo_backbone_ablation import DetGeoBackboneAblation
 from model.DetGeo_single_scale_ca import DetGeoSingleScaleCA
 from model.TROGeo_wo_ost import TROGeoWoOST
+from model.TROGeo_ms_direct_ca_sh import TROGeoMSDirectCASH
 from model.loss import yolo_loss, build_target, adjust_learning_rate
 from utils.utils import AverageMeter, eval_iou_acc
 from utils.checkpoint import save_checkpoint, load_pretrain
@@ -131,6 +132,8 @@ def main():
                         help='standalone TROGeo-style shared Swin-S + CVOPM detection reproduction without OST')
     parser.add_argument('--trogeo_direct_ca', action='store_true',
                         help='TROGeo w/o OST with satellite self-attention removed; direct satellite-query cross-attention only')
+    parser.add_argument('--trogeo_ms_direct_ca_sh', action='store_true',
+                        help='Swin-T stage3/stage4 Direct-CA with separate 6/3-anchor heads and no feature fusion')
     parser.add_argument('--trogeo_backbone', choices=('swin_s', 'swin_t', 'resnet50'), default='swin_s',
                         help='shared ImageNet backbone for TROGeo modes')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
@@ -193,9 +196,12 @@ def main():
         parser.error('--single_scale_ca is a standalone original-DetGeo square-position experiment')
     if args.single_scale_ca and not args.standard_rng:
         parser.error('--single_scale_ca must use --standard_rng (ordinary RNG protocol)')
-    if args.trogeo_wo_ost and args.trogeo_direct_ca:
-        parser.error('--trogeo_wo_ost and --trogeo_direct_ca are mutually exclusive')
-    trogeo_mode = args.trogeo_wo_ost or args.trogeo_direct_ca
+    trogeo_experiments = (args.trogeo_wo_ost, args.trogeo_direct_ca, args.trogeo_ms_direct_ca_sh)
+    if sum(trogeo_experiments) > 1:
+        parser.error('TROGeo experiment modes are mutually exclusive')
+    trogeo_mode = any(trogeo_experiments)
+    if args.trogeo_ms_direct_ca_sh and args.trogeo_backbone != 'swin_t':
+        parser.error('--trogeo_ms_direct_ca_sh currently requires --trogeo_backbone swin_t')
     if not trogeo_mode and args.trogeo_backbone != 'swin_s':
         parser.error('--trogeo_backbone is only valid for a TROGeo mode')
     if trogeo_mode and (args.backbone_exp != 'baseline' or args.single_scale_ca or args.b_variant != 'none'
@@ -318,6 +324,8 @@ def main():
     elif args.trogeo_direct_ca:
         model = TROGeoWoOST(emb_size=args.emb_size, use_satellite_self_attention=False,
                              backbone=args.trogeo_backbone)
+    elif args.trogeo_ms_direct_ca_sh:
+        model = TROGeoMSDirectCASH(emb_size=args.emb_size, backbone=args.trogeo_backbone)
     elif args.backbone_exp != 'baseline':
         model = DetGeoBackboneAblation(emb_size=args.emb_size, leaky=True, backbone_exp=args.backbone_exp)
     elif args.single_scale_ca:
