@@ -137,7 +137,7 @@ def main():
                         help='TROGeo w/o OST with satellite self-attention removed; direct satellite-query cross-attention only')
     parser.add_argument('--trogeo_ms_direct_ca_sh', action='store_true',
                         help='Swin-T stage3/stage4 Direct-CA with separate 6/3-anchor heads and no feature fusion')
-    parser.add_argument('--trogeo_ms_det_variant', choices=('none', 'correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind'),
+    parser.add_argument('--trogeo_ms_det_variant', choices=('none', 'correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive'),
                         default='none', help='controlled Swin-T multi-scale detection ablation')
     parser.add_argument('--h3_iou_threshold', default=0.5, type=float,
                         help='H3: fuse two Top-1 boxes only when their pair IoU reaches this threshold')
@@ -212,8 +212,8 @@ def main():
         parser.error('--trogeo_ms_direct_ca_sh currently requires --trogeo_backbone swin_t')
     if args.trogeo_ms_det_variant != 'none' and args.trogeo_backbone != 'swin_t':
         parser.error('--trogeo_ms_det_variant requires --trogeo_backbone swin_t')
-    if args.trogeo_ms_det_variant == 'h3_ind' and not (args.test or args.val):
-        parser.error('h3_ind is inference-only: train h2_ind then evaluate its best checkpoint with h3_ind')
+    if args.trogeo_ms_det_variant in ('h3_ind', 'h3_adaptive') and not (args.test or args.val):
+        parser.error('H3 variants are inference-only: train h2_ind then evaluate its best checkpoint')
     if not 0.0 <= args.h3_iou_threshold <= 1.0:
         parser.error('--h3_iou_threshold must be in [0, 1]')
     if not trogeo_mode and args.trogeo_backbone != 'swin_s':
@@ -530,9 +530,11 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
             loss_geo, loss_cls = two_head_yolo_loss(p3, p4, ori_gt_bbox, anchors_full, args.img_size)
         else:
             loss_geo = loss_cls = None
-        final_box, diagnostics = select_two_heads(p3, p4, anchors_full, args.img_size,
-                                                  fusion=(variant == 'h3_ind'),
-                                                  iou_threshold=args.h3_iou_threshold)
+        final_box, diagnostics = select_two_heads(
+            p3, p4, anchors_full, args.img_size,
+            fusion=variant in ('h3_ind', 'h3_adaptive'),
+            iou_threshold=args.h3_iou_threshold,
+            adaptive=(variant == 'h3_adaptive'))
     return loss_geo, loss_cls, final_box, diagnostics
 
 

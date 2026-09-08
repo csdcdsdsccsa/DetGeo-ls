@@ -54,8 +54,9 @@ def decode_multigrid_top1(pred3, pred4, anchors, image_wh):
     return torch.where(use3[:, None], box3, box4)
 
 
-def select_two_heads(pred3, pred4, anchors, image_wh, fusion=False, iou_threshold=0.5):
-    """Choose H2 or fuse H3 boxes when their pair IoU reaches ``iou_threshold``."""
+def select_two_heads(pred3, pred4, anchors, image_wh, fusion=False, iou_threshold=0.5,
+                     adaptive=False):
+    """Choose H2 or fuse H3 boxes using a fixed or confidence-adaptive IoU gate."""
     if not 0.0 <= iou_threshold <= 1.0:
         raise ValueError('iou_threshold must be in [0, 1]')
     box3, score3 = decode_top1(pred3, anchors, image_wh)
@@ -63,9 +64,25 @@ def select_two_heads(pred3, pred4, anchors, image_wh, fusion=False, iou_threshol
     use3 = score3 >= score4
     selected = torch.where(use3[:, None], box3, box4)
     pair_iou = bbox_iou(box3, box4, x1y1x2y2=True)
-    fusion_mask = pair_iou.ge(iou_threshold)
-    diagnostics = {'stage3_selected': use3.float().mean(), 'stage4_selected': (~use3).float().mean(),
-                   'pair_iou': pair_iou.mean(), 'fusion_ratio': fusion_mask.float().mean()}
+    if adaptive:
+        balance = 2.0 * torch.minimum(score3, score4) / (score3 + score4 + 1e-12)
+        threshold = 0.7 - 0.3 * balance
+    else:
+        balance = torch.zeros_like(pair_iou)
+        threshold = torch.full_like(pair_iou, float(iou_threshold))
+    fusion_mask = pair_iou.ge(threshold)
+    diagnostics = {
+        'stage3_selected': use3.float().mean(),
+        'stage4_selected': (~use3).float().mean(),
+        'pair_iou': pair_iou.mean(),
+        'fusion_ratio': fusion_mask.float().mean(),
+        'mean_threshold': threshold.mean(),
+        'mean_balance': balance.mean(),
+        'min_threshold': threshold.min(),
+        'max_threshold': threshold.max(),
+        'threshold_lt_0p5_ratio': threshold.lt(0.5).float().mean(),
+        'threshold_ge_0p5_ratio': threshold.ge(0.5).float().mean(),
+    }
     if fusion:
         weight3 = score3 / (score3 + score4 + 1e-12)
         fused = weight3[:, None] * box3 + (1.0 - weight3)[:, None] * box4

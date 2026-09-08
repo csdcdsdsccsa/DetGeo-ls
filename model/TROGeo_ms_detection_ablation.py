@@ -9,9 +9,9 @@ from .trogeo_attention import SpatialTransformer
 
 
 class TROGeoMSDetectionAblation(nn.Module):
-    """E1/E2/E3/E4/E5 heads; the encoder and two Direct-CA blocks are fixed."""
+    """E1--E6 heads; the encoder and two Direct-CA blocks are fixed."""
 
-    VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind')
+    VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive')
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63'):
         super().__init__()
@@ -46,7 +46,7 @@ class TROGeoMSDetectionAblation(nn.Module):
             )
             if variant == 'h2_shared':
                 self.det_head_shared = nn.Conv2d(384, 45, kernel_size=1)
-            else:  # h2_ind and inference-only h3_ind deliberately share names/state layout.
+            else:  # H2/H3 variants deliberately share the independent-head state layout.
                 self.det_head_stage3 = nn.Conv2d(384, 45, kernel_size=1)
                 self.det_head_stage4 = nn.Conv2d(384, 45, kernel_size=1)
 
