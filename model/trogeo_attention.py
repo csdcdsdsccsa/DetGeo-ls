@@ -53,10 +53,17 @@ class CrossAttention(nn.Module):
         self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
         self.to_out = nn.Sequential(nn.Linear(inner_dim, query_dim), nn.Dropout(dropout))
 
-    def forward(self, x, context=None, mask=None):
+    def forward(self, x, context=None, mask=None, context_key=None, context_value=None):
         context = default(context, x)
-        q, k, v = self.to_q(x), self.to_k(context), self.to_v(context)
+        # Defaulting both optional contexts to ``context`` preserves every
+        # existing caller's K/V behavior bit-for-bit.
+        context_key = default(context_key, context)
+        context_value = default(context_value, context)
+        q, k, v = self.to_q(x), self.to_k(context_key), self.to_v(context_value)
         batch, query_tokens, _ = q.shape
+        if k.shape[1] != v.shape[1]:
+            raise RuntimeError('CrossAttention requires equal K/V token counts, got K={} V={}'.format(
+                k.shape[1], v.shape[1]))
         context_tokens = k.shape[1]
         head_dim = q.shape[-1] // self.heads
         def split_heads(tensor):
@@ -108,10 +115,11 @@ class BasicTransformerBlock(nn.Module):
             self.attn1 = None
             self.norm1 = None
 
-    def forward(self, x, context=None):
+    def forward(self, x, context=None, context_key=None, context_value=None):
         if self.use_self_attention:
             x = self.attn1(self.norm1(x)) + x
-        x = self.attn2(self.norm2(x), context=context) + x
+        x = self.attn2(self.norm2(x), context=context, context_key=context_key,
+                       context_value=context_value) + x
         return self.ff(self.norm3(x)) + x
 
 
@@ -131,12 +139,12 @@ class SpatialTransformer(nn.Module):
         )
         self.proj_out = zero_module(nn.Conv2d(inner_dim, in_channels, kernel_size=1))
 
-    def forward(self, x, context=None):
+    def forward(self, x, context=None, context_key=None, context_value=None):
         _, _, height, width = x.shape
         residual = x
         x = self.proj_in(self.norm(x))
         x = x.flatten(2).transpose(1, 2).contiguous()
         for block in self.transformer_blocks:
-            x = block(x, context=context)
+            x = block(x, context=context, context_key=context_key, context_value=context_value)
         x = x.transpose(1, 2).reshape(x.shape[0], x.shape[2], height, width).contiguous()
         return self.proj_out(x) + residual

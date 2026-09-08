@@ -138,7 +138,11 @@ def main():
                         help='TROGeo w/o OST with satellite self-attention removed; direct satellite-query cross-attention only')
     parser.add_argument('--trogeo_ms_direct_ca_sh', action='store_true',
                         help='Swin-T stage3/stage4 Direct-CA with separate 6/3-anchor heads and no feature fusion')
-    parser.add_argument('--trogeo_ms_det_variant', choices=('none', 'correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive', 'h2_ind_3scale', 'h2_ind_3scale_stage2cls05'),
+    parser.add_argument('--trogeo_ms_det_variant', choices=(
+        'none', 'correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive',
+        'h2_ind_3scale', 'h2_ind_3scale_stage2cls05', 'h2_ind_3scale_pe_ln_amp',
+        'h2_ind_3scale_pe_all_add', 'h2_ind_3scale_pe_all_key', 'h2_ind_3scale_le_ind_res',
+        'h2_ind_3scale_le_stage2_res'),
                         default='none', help='controlled Swin-T multi-scale detection ablation')
     parser.add_argument('--h3_iou_threshold', default=0.5, type=float,
                         help='H3: fuse two Top-1 boxes only when their pair IoU reaches this threshold')
@@ -505,7 +509,11 @@ def is_ms_detection_variant(args):
 def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, include_loss=True):
     """Return decoded final boxes and, during training, the matching loss terms."""
     variant = args.trogeo_ms_det_variant
-    if variant in ('h2_ind_3scale', 'h2_ind_3scale_stage2cls05'):
+    three_scale_variants = (
+        'h2_ind_3scale', 'h2_ind_3scale_stage2cls05', 'h2_ind_3scale_pe_ln_amp',
+        'h2_ind_3scale_pe_all_add', 'h2_ind_3scale_pe_all_key', 'h2_ind_3scale_le_ind_res',
+        'h2_ind_3scale_le_stage2_res')
+    if variant in three_scale_variants:
         p2 = predictions['stage2'].view(predictions['stage2'].shape[0], 9, 5, 64, 64)
         p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)
         p4 = predictions['stage4'].view(predictions['stage4'].shape[0], 9, 5, 64, 64)

@@ -297,3 +297,26 @@ lr 1e-4, seed 2024, and ordinary `--standard_rng`.
 | E3 | `h2_shared` | two full 9-anchor heads with shared 384-to-45 predictor | mean two-head loss / softmax-score selection |
 | E4 | `h2_ind` | two full 9-anchor heads with independent predictors | mean two-head loss / softmax-score selection |
 | E5 | `h3_ind` | exact E4 state dict | no training; H3 IoU>=0.5 score-weighted fusion |
+
+## Planned E7 three-scale Query-PE / LE residual-gating ablations
+
+All five variants retain the E7 three-scale backbone, three independent full
+9-anchor heads, equal `three_head_yolo_loss`, and `select_three_heads`. They
+use the existing dataset click map; no Gaussian/GKT or dataset changes are
+introduced. Each trains for 25 epochs with GPU 0, batch 7, workers 24, Swin-T,
+seed 2024, `--standard_rng`, and lr 1e-4, then evaluates its validation-best
+checkpoint once on the test split.
+
+| CLI variant | Query-side position treatment |
+|---|---|
+| `h2_ind_3scale_pe_ln_amp` | `P * LN(MLP(P))` added to K/V context |
+| `h2_ind_3scale_pe_all_add` | `MLP(P)` added to K/V context |
+| `h2_ind_3scale_pe_all_key` | `MLP(P)` added to K only; V remains original Query |
+| `h2_ind_3scale_le_ind_res` | independent LE maps with `q + sigmoid(beta) * A * q` |
+| `h2_ind_3scale_le_stage2_res` | Stage2 LE map resized to all scales with residual gates |
+
+The optional PE/LE modules are constructed only after E7 base modules and the
+CPU RNG state is restored afterward, so those additions do not perturb the
+baseline model's initialization stream. `tools/test_trogeo_query_pe_3scale.py`
+runs two optimizer steps per variant because zero-initialized CVOPM `proj_out`
+blocks PE/LE gradients on the first backward pass by design.

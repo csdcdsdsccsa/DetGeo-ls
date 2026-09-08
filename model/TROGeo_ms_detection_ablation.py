@@ -2,11 +2,26 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.models as models
 
 from .TROGeo_ms_direct_ca_sh import SwinTMultiStageEncoder
 from .TROGeo_wo_ost import double_conv
 from .trogeo_attention import SpatialTransformer
+
+
+def _make_pe_mlp(out_dim):
+    return nn.Sequential(nn.Linear(1, 128), nn.GELU(), nn.Linear(128, out_dim))
+
+
+def _make_le_block():
+    return nn.Sequential(
+        nn.Conv2d(2, 16, kernel_size=3, stride=1, padding=1, bias=False),
+        nn.BatchNorm2d(16),
+        nn.ReLU(inplace=True),
+        nn.Conv2d(16, 1, kernel_size=3, stride=1, padding=1, bias=True),
+        nn.Sigmoid(),
+    )
 
 
 class SwinTThreeStageEncoder(nn.Module):
@@ -32,15 +47,23 @@ class SwinTThreeStageEncoder(nn.Module):
 class TROGeoMSDetectionAblation(nn.Module):
     """E1--E8 heads; E7/E8 expand independent Direct-CA to three scales."""
 
-    VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive',
-                      'h2_ind_3scale', 'h2_ind_3scale_stage2cls05')
+    QUERY_PE_VARIANTS = (
+        'h2_ind_3scale_pe_ln_amp',
+        'h2_ind_3scale_pe_all_add',
+        'h2_ind_3scale_pe_all_key',
+        'h2_ind_3scale_le_ind_res',
+        'h2_ind_3scale_le_stage2_res',
+    )
+    THREE_SCALE_VARIANTS = ('h2_ind_3scale', 'h2_ind_3scale_stage2cls05') + QUERY_PE_VARIANTS
+    VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive') + \
+                     THREE_SCALE_VARIANTS
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63'):
         super().__init__()
         if emb_size != 768 or backbone != 'swin_t' or variant not in self.VALID_VARIANTS:
             raise ValueError('requires emb_size=768, backbone=swin_t, and a valid MS variant')
         self.variant = variant
-        self.three_scale = variant in ('h2_ind_3scale', 'h2_ind_3scale_stage2cls05')
+        self.three_scale = variant in self.THREE_SCALE_VARIANTS
         self.encoder = SwinTThreeStageEncoder() if self.three_scale else SwinTMultiStageEncoder()
         self.position_embedding = double_conv(4, 3)
         if self.three_scale:
@@ -82,11 +105,97 @@ class TROGeoMSDetectionAblation(nn.Module):
                     )
                     self.det_head_stage2 = nn.Conv2d(384, 45, kernel_size=1)
 
+        # Construct optional PE/LE modules after all E7 base modules, then
+        # restore RNG so their initialization cannot perturb E7's trajectory.
+        _pos_rng_state = torch.get_rng_state()
+        try:
+            if self.variant in self.QUERY_PE_VARIANTS[:3]:
+                self.pe_proj2 = _make_pe_mlp(192)
+                self.pe_proj3 = _make_pe_mlp(384)
+                self.pe_proj4 = _make_pe_mlp(768)
+                self.pe_alpha2 = nn.Parameter(torch.tensor(0.1))
+                self.pe_alpha3 = nn.Parameter(torch.tensor(0.1))
+                self.pe_alpha4 = nn.Parameter(torch.tensor(0.1))
+                if self.variant == 'h2_ind_3scale_pe_ln_amp':
+                    self.pe_norm2 = nn.LayerNorm(192)
+                    self.pe_norm3 = nn.LayerNorm(384)
+                    self.pe_norm4 = nn.LayerNorm(768)
+            elif self.variant == 'h2_ind_3scale_le_ind_res':
+                self.le_stage2 = _make_le_block()
+                self.le_stage3 = _make_le_block()
+                self.le_stage4 = _make_le_block()
+                self.le_beta2_logit = nn.Parameter(torch.tensor(-2.1972246))
+                self.le_beta3_logit = nn.Parameter(torch.tensor(-2.1972246))
+                self.le_beta4_logit = nn.Parameter(torch.tensor(-2.1972246))
+            elif self.variant == 'h2_ind_3scale_le_stage2_res':
+                self.le_stage2 = _make_le_block()
+                self.le_beta2_logit = nn.Parameter(torch.tensor(-2.1972246))
+                self.le_beta3_logit = nn.Parameter(torch.tensor(-2.1972246))
+                self.le_beta4_logit = nn.Parameter(torch.tensor(-2.1972246))
+        finally:
+            torch.set_rng_state(_pos_rng_state)
+
     @staticmethod
     def _expect(name, tensor, channels, height, width):
         if tensor.shape[1:] != (channels, height, width):
             raise RuntimeError('expected {} [B,{},{},{}], got {}'.format(
                 name, channels, height, width, tuple(tensor.shape)))
+
+    @staticmethod
+    def _to_tokens(feature):
+        return feature.flatten(2).transpose(1, 2).contiguous()
+
+    @staticmethod
+    def _position_pyramid(click_map, q2, q3, q4):
+        position = click_map.unsqueeze(1).to(device=q2.device, dtype=q2.dtype)
+        resize = lambda target: F.interpolate(position, size=target.shape[-2:], mode='bilinear', align_corners=False)
+        return resize(q2), resize(q3), resize(q4)
+
+    def _query_contexts(self, click_map, q2, q3, q4):
+        """Return standard contexts plus optional separate K/V contexts for Query-PE variants."""
+        q2_tokens, q3_tokens, q4_tokens = self._to_tokens(q2), self._to_tokens(q3), self._to_tokens(q4)
+        contexts = [q2_tokens, q3_tokens, q4_tokens]
+        key_contexts = value_contexts = [None, None, None]
+        if self.variant in self.QUERY_PE_VARIANTS[:3]:
+            p2, p3, p4 = self._position_pyramid(click_map, q2, q3, q4)
+            p_tokens = [self._to_tokens(p2), self._to_tokens(p3), self._to_tokens(p4)]
+            pe = [self.pe_proj2(p_tokens[0]), self.pe_proj3(p_tokens[1]), self.pe_proj4(p_tokens[2])]
+            if self.variant == 'h2_ind_3scale_pe_ln_amp':
+                pe = [self.pe_norm2(pe[0]) * p_tokens[0], self.pe_norm3(pe[1]) * p_tokens[1],
+                      self.pe_norm4(pe[2]) * p_tokens[2]]
+            additive = [self.pe_alpha2 * pe[0], self.pe_alpha3 * pe[1], self.pe_alpha4 * pe[2]]
+            if self.variant == 'h2_ind_3scale_pe_all_key':
+                key_contexts = [q2_tokens + additive[0], q3_tokens + additive[1], q4_tokens + additive[2]]
+                value_contexts = [q2_tokens, q3_tokens, q4_tokens]
+            else:
+                contexts = [q2_tokens + additive[0], q3_tokens + additive[1], q4_tokens + additive[2]]
+        elif self.variant in ('h2_ind_3scale_le_ind_res', 'h2_ind_3scale_le_stage2_res'):
+            p2, p3, p4 = self._position_pyramid(click_map, q2, q3, q4)
+            if self.variant == 'h2_ind_3scale_le_ind_res':
+                gates = [
+                    self.le_stage2(torch.cat((p2, q2.mean(dim=1, keepdim=True)), dim=1)),
+                    self.le_stage3(torch.cat((p3, q3.mean(dim=1, keepdim=True)), dim=1)),
+                    self.le_stage4(torch.cat((p4, q4.mean(dim=1, keepdim=True)), dim=1)),
+                ]
+            else:
+                gate2 = self.le_stage2(torch.cat((p2, q2.mean(dim=1, keepdim=True)), dim=1))
+                gates = [gate2, F.interpolate(gate2, size=q3.shape[-2:], mode='bilinear', align_corners=False),
+                         F.interpolate(gate2, size=q4.shape[-2:], mode='bilinear', align_corners=False)]
+            betas = [torch.sigmoid(self.le_beta2_logit), torch.sigmoid(self.le_beta3_logit),
+                     torch.sigmoid(self.le_beta4_logit)]
+            contexts = [self._to_tokens(q2 + betas[0] * gates[0] * q2),
+                        self._to_tokens(q3 + betas[1] * gates[1] * q3),
+                        self._to_tokens(q4 + betas[2] * gates[2] * q4)]
+        return contexts, key_contexts, value_contexts
+
+    def _position_mode(self):
+        return {
+            'h2_ind_3scale_pe_ln_amp': 'PE=P*LN(MLP(P)); add_to_KV=True',
+            'h2_ind_3scale_pe_all_add': 'PE=MLP(P); add_to_KV=True',
+            'h2_ind_3scale_pe_all_key': 'PE=MLP(P); add_to_K_only=True',
+            'h2_ind_3scale_le_ind_res': 'Independent-LE residual gating',
+            'h2_ind_3scale_le_stage2_res': 'Stage2-LE shared residual gating',
+        }.get(self.variant, 'none')
 
     def forward(self, query_imgs, reference_imgs, click_map):
         query_input = self.position_embedding(torch.cat((query_imgs, click_map.unsqueeze(1)), dim=1))
@@ -95,7 +204,9 @@ class TROGeoMSDetectionAblation(nn.Module):
             r2, r3, r4 = self.encoder(reference_imgs)
             self._expect('query stage2', q2, 192, 32, 32)
             self._expect('satellite stage2', r2, 192, 128, 128)
-            z2 = self.cvopm_stage2(r2, context=q2.flatten(2).transpose(1, 2).contiguous())
+            contexts, key_contexts, value_contexts = self._query_contexts(click_map, q2, q3, q4)
+            z2 = self.cvopm_stage2(r2, context=contexts[0], context_key=key_contexts[0],
+                                   context_value=value_contexts[0])
         else:
             q3, q4 = self.encoder(query_input)
             r3, r4 = self.encoder(reference_imgs)
@@ -103,8 +214,14 @@ class TROGeoMSDetectionAblation(nn.Module):
         self._expect('query stage4', q4, 768, 8, 8)
         self._expect('satellite stage3', r3, 384, 64, 64)
         self._expect('satellite stage4', r4, 768, 32, 32)
-        z3 = self.cvopm_stage3(r3, context=q3.flatten(2).transpose(1, 2).contiguous())
-        z4 = self.cvopm_stage4(r4, context=q4.flatten(2).transpose(1, 2).contiguous())
+        if self.three_scale:
+            z3 = self.cvopm_stage3(r3, context=contexts[1], context_key=key_contexts[1],
+                                   context_value=value_contexts[1])
+            z4 = self.cvopm_stage4(r4, context=contexts[2], context_key=key_contexts[2],
+                                   context_value=value_contexts[2])
+        else:
+            z3 = self.cvopm_stage3(r3, context=self._to_tokens(q3))
+            z4 = self.cvopm_stage4(r4, context=self._to_tokens(q4))
 
         if self.three_scale:
             p2 = self.det_head_stage2(self.stage2_align(z2))
@@ -142,10 +259,10 @@ class TROGeoMSDetectionAblation(nn.Module):
                 print('[TROGeo MS detection sanity] variant={} shared_encoder=True '
                       'self_attention_stage2=False self_attention_stage3=False self_attention_stage4=False '
                       'stage2_query_chunk=512 q2={} q3={} q4={} r2={} r3={} r4={} z2={} z3={} z4={} '
-                      'predictions={} feature_fusion=False'.format(
+                      'predictions={} feature_fusion=False position_mode={}'.format(
                           self.variant, tuple(q2.shape), tuple(q3.shape), tuple(q4.shape), tuple(r2.shape),
                           tuple(r3.shape), tuple(r4.shape), tuple(z2.shape), tuple(z3.shape), tuple(z4.shape),
-                          shapes), flush=True)
+                          shapes, self._position_mode()), flush=True)
             else:
                 print('[TROGeo MS detection sanity] variant={} shared_encoder=True self_attention_stage3=False '
                       'self_attention_stage4=False q3={} q4={} r3={} r4={} z3={} z4={} predictions={} '
