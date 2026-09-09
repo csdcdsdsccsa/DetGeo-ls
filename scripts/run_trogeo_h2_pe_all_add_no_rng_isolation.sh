@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# E4 two-scale PE-All -> K/V, with no model-initialization RNG restoration.
+# E4 H2-Ind two-scale PE-All -> K/V, with no PE-initialization RNG restoration.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PYTHON_BIN="${PYTHON_BIN:-/root/miniconda3/envs/detgeo/bin/python}"
-NAME="trogeo_ms_h2_ind_pe_all_add_noinitrng_swin_t_drone_seed2024"
+NAME="trogeo_ms_e4_h2_ind_pe_all_add_noinitrng_swin_t_drone_seed2024"
 COMMON=(--gpu 0 --num_workers 24 --batch_size 7 --emb_size 768 --img_size 1024
   --data_root data --data_name CVOGL_DroneAerial --trogeo_backbone swin_t --standard_rng
   --seed 2024 --beta 1.0 --print_freq 50)

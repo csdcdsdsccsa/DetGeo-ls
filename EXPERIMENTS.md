@@ -351,6 +351,17 @@ restoration, so they did not alter the E4 base initialization stream.
   trajectory without `torch.get_rng_state()` / `torch.set_rng_state()`.
 - Protocol: GPU 0, Swin-T, batch 7, workers 24, seed 2024, `--standard_rng`,
   Adam, lr 1e-4, beta 1.0, 25 epochs, validation-best selection, then one test.
+
+## E4 H2-Ind PE-All K/V rerun without PE initialization RNG restoration
+
+- This rerun keeps the strict E4 two-scale detector: Direct-CA only at Stage3
+  and Stage4, two independent complete 9-anchor heads, `two_head_yolo_loss`,
+  and `select_two_heads` without box fusion.
+- `h2_ind_pe_all_add` uses `MLP(P)` at Stage3/4 and adds it to Query K/V.  Its
+  PE modules initialize on the ordinary RNG trajectory without CPU RNG state
+  save/restore.
+- Protocol: GPU 0, Swin-T, batch 7, workers 24, seed 2024, `--standard_rng`,
+  Adam, lr 1e-4, beta 1.0, 25 epochs, validation-best selection, then one test.
 `tools/test_trogeo_query_pe_2scale.py` performs a two-step GPU backward check:
 the first step verifies heads and zero-initialized `proj_out`; the second
 verifies PE/LE gradients.  Results are intentionally not recorded until the
