@@ -73,9 +73,17 @@ class TROGeoMSDetectionAblation(nn.Module):
     TWO_SCALE_QUERY_PE_VARIANTS = TWO_SCALE_EMBED_VARIANTS + (
         'h2_ind_le_stage2_res',
     )
+    # Strict E4 two-scale position-guided cross-attention variants.  Position
+    # information changes only the pre-softmax attention logits; Query K/V are
+    # left untouched and no Stage2 CA/head is constructed.
+    TWO_SCALE_PGCA_VARIANTS = (
+        'h2_ind_pgca_c_direct',
+        'h2_ind_pgca_a_conv',
+        'h2_ind_pgca_b_dynamic',
+    )
     THREE_SCALE_VARIANTS = ('h2_ind_3scale', 'h2_ind_3scale_stage2cls05') + QUERY_PE_VARIANTS
     VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive') + \
-                     THREE_SCALE_VARIANTS + TWO_SCALE_QUERY_PE_VARIANTS
+                     THREE_SCALE_VARIANTS + TWO_SCALE_QUERY_PE_VARIANTS + TWO_SCALE_PGCA_VARIANTS
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63'):
         super().__init__()
@@ -166,6 +174,20 @@ class TROGeoMSDetectionAblation(nn.Module):
             self.le_stage2 = _make_le_block()
             self.le_beta3_logit = nn.Parameter(torch.tensor(-2.1972246))
             self.le_beta4_logit = nn.Parameter(torch.tensor(-2.1972246))
+        elif self.variant in self.TWO_SCALE_PGCA_VARIANTS:
+            if self.variant != 'h2_ind_pgca_c_direct':
+                self.pe_bias3 = nn.Conv2d(3, 1, kernel_size=1)
+                self.pe_bias4 = nn.Conv2d(3, 1, kernel_size=1)
+            if self.variant == 'h2_ind_pgca_b_dynamic':
+                self.lambda_predictor3 = nn.Sequential(
+                    nn.Linear(384, 128), nn.ReLU(inplace=True), nn.Linear(128, 1), nn.Sigmoid())
+                self.lambda_predictor4 = nn.Sequential(
+                    nn.Linear(768, 128), nn.ReLU(inplace=True), nn.Linear(128, 1), nn.Sigmoid())
+            else:
+                # A/C use one learned global strength per scale; unlike B it is
+                # fixed across samples and starts as a small residual (0.05).
+                self.lambda3 = nn.Parameter(torch.tensor(0.05))
+                self.lambda4 = nn.Parameter(torch.tensor(0.05))
 
     @staticmethod
     def _expect(name, tensor, channels, height, width):
@@ -210,6 +232,21 @@ class TROGeoMSDetectionAblation(nn.Module):
         beta3, beta4 = torch.sigmoid(self.le_beta3_logit), torch.sigmoid(self.le_beta4_logit)
         return (self._to_tokens(q3 + beta3 * gate3 * q3),
                 self._to_tokens(q4 + beta4 * gate4 * q4))
+
+    def _two_scale_position_biases(self, position_feature, q3, q4):
+        """Build Stage3/4 logit biases without modifying Query K or V."""
+        p3 = F.interpolate(position_feature, size=q3.shape[-2:], mode='bilinear', align_corners=False)
+        p4 = F.interpolate(position_feature, size=q4.shape[-2:], mode='bilinear', align_corners=False)
+        if self.variant == 'h2_ind_pgca_c_direct':
+            bias3, bias4 = p3.mean(dim=1, keepdim=True), p4.mean(dim=1, keepdim=True)
+        else:
+            bias3, bias4 = self.pe_bias3(p3), self.pe_bias4(p4)
+        if self.variant == 'h2_ind_pgca_b_dynamic':
+            lambda3 = self.lambda_predictor3(q3.mean(dim=(2, 3)))
+            lambda4 = self.lambda_predictor4(q4.mean(dim=(2, 3)))
+        else:
+            lambda3, lambda4 = self.lambda3, self.lambda4
+        return bias3.flatten(2), bias4.flatten(2), lambda3, lambda4
 
     def _query_contexts(self, click_map, q2, q3, q4):
         """Return standard contexts plus optional separate K/V contexts for Query-PE variants."""
@@ -260,10 +297,14 @@ class TROGeoMSDetectionAblation(nn.Module):
             'h2_ind_pe_all_add': 'PE=MLP(P); add_to_KV=True',
             'h2_ind_pe_all_key': 'PE=MLP(P); add_to_K_only=True',
             'h2_ind_le_stage2_res': 'Stage2-LE propagated residual gating',
+            'h2_ind_pgca_c_direct': 'PGCA-C direct original-PE logit bias; global lambda',
+            'h2_ind_pgca_a_conv': 'PGCA-A learned 1x1-conv logit bias; global lambda',
+            'h2_ind_pgca_b_dynamic': 'PGCA-B learned 1x1-conv logit bias; sample-adaptive lambda',
         }.get(self.variant, 'none')
 
     def forward(self, query_imgs, reference_imgs, click_map):
-        query_input = self.position_embedding(torch.cat((query_imgs, click_map.unsqueeze(1)), dim=1))
+        position_feature = self.position_embedding(torch.cat((query_imgs, click_map.unsqueeze(1)), dim=1))
+        query_input = position_feature
         if self.three_scale:
             q2, q3, q4 = self.encoder(query_input)
             r2, r3, r4 = self.encoder(reference_imgs)
@@ -296,6 +337,12 @@ class TROGeoMSDetectionAblation(nn.Module):
             context3, context4 = self._two_scale_stage2_le_contexts(click_map, q2, q3, q4)
             z3 = self.cvopm_stage3(r3, context=context3)
             z4 = self.cvopm_stage4(r4, context=context4)
+        elif self.variant in self.TWO_SCALE_PGCA_VARIANTS:
+            bias3, bias4, lambda3, lambda4 = self._two_scale_position_biases(position_feature, q3, q4)
+            z3 = self.cvopm_stage3(r3, context=self._to_tokens(q3),
+                                   position_bias=bias3, position_lambda=lambda3)
+            z4 = self.cvopm_stage4(r4, context=self._to_tokens(q4),
+                                   position_bias=bias4, position_lambda=lambda4)
         else:
             z3 = self.cvopm_stage3(r3, context=self._to_tokens(q3))
             z4 = self.cvopm_stage4(r4, context=self._to_tokens(q4))

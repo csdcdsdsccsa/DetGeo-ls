@@ -144,7 +144,8 @@ def main():
         'h2_ind_3scale_pe_all_add', 'h2_ind_3scale_pe_all_key', 'h2_ind_3scale_le_ind_res',
         'h2_ind_3scale_le_stage2_res',
         'h2_ind_pe_ln_amp_kv', 'h2_ind_pe_ln_amp_key', 'h2_ind_pe_all_add',
-        'h2_ind_pe_all_key', 'h2_ind_le_stage2_res'),
+        'h2_ind_pe_all_key', 'h2_ind_le_stage2_res',
+        'h2_ind_pgca_c_direct', 'h2_ind_pgca_a_conv', 'h2_ind_pgca_b_dynamic'),
                         default='none', help='controlled Swin-T multi-scale detection ablation')
     parser.add_argument('--h3_iou_threshold', default=0.5, type=float,
                         help='H3: fuse two Top-1 boxes only when their pair IoU reaches this threshold')

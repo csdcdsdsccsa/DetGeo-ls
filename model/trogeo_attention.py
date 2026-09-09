@@ -53,7 +53,8 @@ class CrossAttention(nn.Module):
         self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
         self.to_out = nn.Sequential(nn.Linear(inner_dim, query_dim), nn.Dropout(dropout))
 
-    def forward(self, x, context=None, mask=None, context_key=None, context_value=None):
+    def forward(self, x, context=None, mask=None, context_key=None, context_value=None,
+                position_bias=None, position_lambda=None):
         context = default(context, x)
         # Defaulting both optional contexts to ``context`` preserves every
         # existing caller's K/V behavior bit-for-bit.
@@ -71,6 +72,35 @@ class CrossAttention(nn.Module):
                 batch * self.heads, tensor.shape[1], head_dim
             )
         q, k, v = split_heads(q), split_heads(k), split_heads(v)
+        attention_bias = None
+        if position_bias is not None:
+            if position_bias.ndim == 2:
+                position_bias = position_bias.unsqueeze(1)
+            if position_bias.ndim != 3 or position_bias.shape != (batch, 1, context_tokens):
+                raise RuntimeError(
+                    'position_bias must be [B,1,K] matching attention context; got {} for B={} K={}'.format(
+                        tuple(position_bias.shape), batch, context_tokens))
+            position_bias = position_bias.to(device=q.device, dtype=q.dtype)
+            if position_lambda is None:
+                position_lambda = position_bias.new_tensor(1.0)
+            elif not torch.is_tensor(position_lambda):
+                position_lambda = position_bias.new_tensor(position_lambda)
+            else:
+                position_lambda = position_lambda.to(device=q.device, dtype=q.dtype)
+            if position_lambda.ndim == 0:
+                position_lambda = position_lambda.view(1, 1, 1)
+            elif position_lambda.ndim == 1 and position_lambda.shape[0] == batch:
+                position_lambda = position_lambda.view(batch, 1, 1)
+            elif position_lambda.ndim == 2 and position_lambda.shape == (batch, 1):
+                position_lambda = position_lambda.unsqueeze(-1)
+            elif position_lambda.shape != (batch, 1, 1):
+                raise RuntimeError('position_lambda must be scalar, [B], [B,1], or [B,1,1], got {}'.format(
+                    tuple(position_lambda.shape)))
+            combined_bias = position_bias * position_lambda
+            if combined_bias.shape[0] == 1 and batch != 1:
+                combined_bias = combined_bias.expand(batch, -1, -1)
+            attention_bias = combined_bias[:, None].expand(batch, self.heads, 1, context_tokens).reshape(
+                batch * self.heads, 1, context_tokens)
         if mask is not None:
             mask = mask.reshape(batch, -1)
             mask = mask[:, None, None, :].expand(batch, self.heads, 1, context_tokens).reshape(
@@ -78,6 +108,8 @@ class CrossAttention(nn.Module):
             )
         if self.query_chunk_size is None or query_tokens <= self.query_chunk_size:
             similarity = einsum('b i d, b j d -> b i j', q, k) * self.scale
+            if attention_bias is not None:
+                similarity = similarity + attention_bias
             if mask is not None:
                 similarity.masked_fill_(~mask, -torch.finfo(similarity.dtype).max)
             out = einsum('b i j, b j d -> b i d', similarity.softmax(dim=-1), v)
@@ -87,6 +119,8 @@ class CrossAttention(nn.Module):
             chunks = []
             for q_chunk in q.split(self.query_chunk_size, dim=1):
                 similarity = einsum('b i d, b j d -> b i j', q_chunk, k) * self.scale
+                if attention_bias is not None:
+                    similarity = similarity + attention_bias
                 if mask is not None:
                     similarity.masked_fill_(~mask, -torch.finfo(similarity.dtype).max)
                 chunks.append(einsum('b i j, b j d -> b i d', similarity.softmax(dim=-1), v))
@@ -115,11 +149,13 @@ class BasicTransformerBlock(nn.Module):
             self.attn1 = None
             self.norm1 = None
 
-    def forward(self, x, context=None, context_key=None, context_value=None):
+    def forward(self, x, context=None, context_key=None, context_value=None,
+                position_bias=None, position_lambda=None):
         if self.use_self_attention:
             x = self.attn1(self.norm1(x)) + x
         x = self.attn2(self.norm2(x), context=context, context_key=context_key,
-                       context_value=context_value) + x
+                       context_value=context_value, position_bias=position_bias,
+                       position_lambda=position_lambda) + x
         return self.ff(self.norm3(x)) + x
 
 
@@ -139,12 +175,14 @@ class SpatialTransformer(nn.Module):
         )
         self.proj_out = zero_module(nn.Conv2d(inner_dim, in_channels, kernel_size=1))
 
-    def forward(self, x, context=None, context_key=None, context_value=None):
+    def forward(self, x, context=None, context_key=None, context_value=None,
+                position_bias=None, position_lambda=None):
         _, _, height, width = x.shape
         residual = x
         x = self.proj_in(self.norm(x))
         x = x.flatten(2).transpose(1, 2).contiguous()
         for block in self.transformer_blocks:
-            x = block(x, context=context, context_key=context_key, context_value=context_value)
+            x = block(x, context=context, context_key=context_key, context_value=context_value,
+                      position_bias=position_bias, position_lambda=position_lambda)
         x = x.transpose(1, 2).reshape(x.shape[0], x.shape[2], height, width).contiguous()
         return self.proj_out(x) + residual

@@ -366,3 +366,27 @@ restoration, so they did not alter the E4 base initialization stream.
 the first step verifies heads and zero-initialized `proj_out`; the second
 verifies PE/LE gradients.  Results are intentionally not recorded until the
 sequential runner completes each train/validation-best-test cycle.
+
+# Strict E4 two-scale Position-Guided Cross-Attention (PGCA)
+
+This ablation keeps the E4 H2-Ind shared Swin-T encoder, original DetGeo
+`position_embedding`, Stage3/Stage4 Direct-CA blocks, two independent full
+9-anchor heads, two-head loss, and ordinary `--standard_rng` protocol.  It does
+not construct or use any Stage2 CA/head and does not modify the Query K/V
+tokens.  The only intervention is a broadcast position bias added to the
+Stage3/Stage4 Cross-Attention logits before softmax:
+
+`Softmax(QK^T / sqrt(d) + lambda * B) V`.
+
+- `h2_ind_pgca_c_direct`: channel-mean original position feature is `B`; one
+  learned global lambda per scale, initialized to 0.05.
+- `h2_ind_pgca_a_conv`: a learned 1x1 convolution maps the original 3-channel
+  position feature to `B`; one learned global lambda per scale, initialized to
+  0.05.
+- `h2_ind_pgca_b_dynamic`: uses the same learned bias, with a per-sample lambda
+  predicted from global-pooled Stage3/Stage4 Query features by an MLP + sigmoid.
+
+Run order is C -> A -> B.  Each run trains from the common ImageNet Swin-T
+initialization for 25 epochs with batch 7, workers 24, seed 2024 and lr 1e-4;
+validation selects the best checkpoint, which is tested exactly once.  The
+last-epoch checkpoint is then removed and the best checkpoint is retained.
