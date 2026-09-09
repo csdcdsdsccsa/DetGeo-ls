@@ -320,3 +320,28 @@ CPU RNG state is restored afterward, so those additions do not perturb the
 baseline model's initialization stream. `tools/test_trogeo_query_pe_3scale.py`
 runs two optimizer steps per variant because zero-initialized CVOPM `proj_out`
 blocks PE/LE gradients on the first backward pass by design.
+
+## Planned strict E4 two-scale Query-PE / LE ablations
+
+These five variants preserve E4 `h2_ind`: Direct-CA only at Stage3/Stage4,
+two independent complete 9-anchor heads, `stage4_align`,
+`two_head_yolo_loss`, and `select_two_heads`.  They do not create a Stage2
+CA block, Stage2 head, Stage2 prediction, or Stage2 loss.  The LE variant
+exposes Query Stage2 only to produce a single propagated spatial gate.
+
+| CLI variant | Query-side position treatment |
+|---|---|
+| `h2_ind_pe_ln_amp_kv` | `P * LN(MLP(P))`, independently added to Stage3/4 K and V |
+| `h2_ind_pe_ln_amp_key` | same PE, added only to K; V remains the original Query |
+| `h2_ind_pe_all_add` | `MLP(P)` added to Stage3/4 K and V |
+| `h2_ind_pe_all_key` | `MLP(P)` added only to K; V remains the original Query |
+| `h2_ind_le_stage2_res` | a single Stage2 LE map resized into residual Stage3/4 gates |
+
+All runs use GPU 0, Swin-T, batch 7, workers 24, seed 2024,
+`--standard_rng`, Adam, lr 1e-4, beta 1.0, 25 epochs, and no task checkpoint.
+The modules are initialized after the E4 base modules with CPU RNG restoration,
+so their optional parameters do not alter the base initialization stream.
+`tools/test_trogeo_query_pe_2scale.py` performs a two-step GPU backward check:
+the first step verifies heads and zero-initialized `proj_out`; the second
+verifies PE/LE gradients.  Results are intentionally not recorded until the
+sequential runner completes each train/validation-best-test cycle.

@@ -54,9 +54,28 @@ class TROGeoMSDetectionAblation(nn.Module):
         'h2_ind_3scale_le_ind_res',
         'h2_ind_3scale_le_stage2_res',
     )
+    # Strict E4 two-scale Query-position ablations.  These intentionally do
+    # not create a Stage2 CA/head or enter the three-head loss path.
+    TWO_SCALE_EMBED_VARIANTS = (
+        'h2_ind_pe_ln_amp_kv',
+        'h2_ind_pe_ln_amp_key',
+        'h2_ind_pe_all_add',
+        'h2_ind_pe_all_key',
+    )
+    TWO_SCALE_LN_AMP_VARIANTS = (
+        'h2_ind_pe_ln_amp_kv',
+        'h2_ind_pe_ln_amp_key',
+    )
+    TWO_SCALE_KEY_ONLY_VARIANTS = (
+        'h2_ind_pe_ln_amp_key',
+        'h2_ind_pe_all_key',
+    )
+    TWO_SCALE_QUERY_PE_VARIANTS = TWO_SCALE_EMBED_VARIANTS + (
+        'h2_ind_le_stage2_res',
+    )
     THREE_SCALE_VARIANTS = ('h2_ind_3scale', 'h2_ind_3scale_stage2cls05') + QUERY_PE_VARIANTS
     VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive') + \
-                     THREE_SCALE_VARIANTS
+                     THREE_SCALE_VARIANTS + TWO_SCALE_QUERY_PE_VARIANTS
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63'):
         super().__init__()
@@ -64,7 +83,11 @@ class TROGeoMSDetectionAblation(nn.Module):
             raise ValueError('requires emb_size=768, backbone=swin_t, and a valid MS variant')
         self.variant = variant
         self.three_scale = variant in self.THREE_SCALE_VARIANTS
-        self.encoder = SwinTThreeStageEncoder() if self.three_scale else SwinTMultiStageEncoder()
+        # q2 is exposed only to construct the propagated LE gate; detection
+        # remains strictly two-scale for this variant.
+        self.need_query_stage2 = variant == 'h2_ind_le_stage2_res'
+        self.encoder = (SwinTThreeStageEncoder() if (self.three_scale or self.need_query_stage2)
+                        else SwinTMultiStageEncoder())
         self.position_embedding = double_conv(4, 3)
         if self.three_scale:
             self.cvopm_stage2 = SpatialTransformer(192, 3, 64, depth=1, context_dim=192,
@@ -132,6 +155,18 @@ class TROGeoMSDetectionAblation(nn.Module):
                 self.le_beta2_logit = nn.Parameter(torch.tensor(-2.1972246))
                 self.le_beta3_logit = nn.Parameter(torch.tensor(-2.1972246))
                 self.le_beta4_logit = nn.Parameter(torch.tensor(-2.1972246))
+            elif self.variant in self.TWO_SCALE_EMBED_VARIANTS:
+                self.pe_proj3 = _make_pe_mlp(384)
+                self.pe_proj4 = _make_pe_mlp(768)
+                self.pe_alpha3 = nn.Parameter(torch.tensor(0.1))
+                self.pe_alpha4 = nn.Parameter(torch.tensor(0.1))
+                if self.variant in self.TWO_SCALE_LN_AMP_VARIANTS:
+                    self.pe_norm3 = nn.LayerNorm(384)
+                    self.pe_norm4 = nn.LayerNorm(768)
+            elif self.variant == 'h2_ind_le_stage2_res':
+                self.le_stage2 = _make_le_block()
+                self.le_beta3_logit = nn.Parameter(torch.tensor(-2.1972246))
+                self.le_beta4_logit = nn.Parameter(torch.tensor(-2.1972246))
         finally:
             torch.set_rng_state(_pos_rng_state)
 
@@ -146,10 +181,38 @@ class TROGeoMSDetectionAblation(nn.Module):
         return feature.flatten(2).transpose(1, 2).contiguous()
 
     @staticmethod
+    def _resize_position(click_map, target):
+        position = click_map.unsqueeze(1).to(device=target.device, dtype=target.dtype)
+        return F.interpolate(position, size=target.shape[-2:], mode='bilinear', align_corners=False)
+
+    @staticmethod
     def _position_pyramid(click_map, q2, q3, q4):
-        position = click_map.unsqueeze(1).to(device=q2.device, dtype=q2.dtype)
-        resize = lambda target: F.interpolate(position, size=target.shape[-2:], mode='bilinear', align_corners=False)
-        return resize(q2), resize(q3), resize(q4)
+        return (TROGeoMSDetectionAblation._resize_position(click_map, q2),
+                TROGeoMSDetectionAblation._resize_position(click_map, q3),
+                TROGeoMSDetectionAblation._resize_position(click_map, q4))
+
+    def _two_scale_pe_contexts(self, click_map, q3, q4):
+        """Return E4 two-scale contexts, with optional separate K/V inputs."""
+        q3_tokens, q4_tokens = self._to_tokens(q3), self._to_tokens(q4)
+        p3_tokens = self._to_tokens(self._resize_position(click_map, q3))
+        p4_tokens = self._to_tokens(self._resize_position(click_map, q4))
+        pe3, pe4 = self.pe_proj3(p3_tokens), self.pe_proj4(p4_tokens)
+        if self.variant in self.TWO_SCALE_LN_AMP_VARIANTS:
+            pe3, pe4 = self.pe_norm3(pe3) * p3_tokens, self.pe_norm4(pe4) * p4_tokens
+        additive3, additive4 = self.pe_alpha3 * pe3, self.pe_alpha4 * pe4
+        if self.variant in self.TWO_SCALE_KEY_ONLY_VARIANTS:
+            return (q3_tokens, q4_tokens, q3_tokens + additive3, q4_tokens + additive4,
+                    q3_tokens, q4_tokens)
+        return (q3_tokens + additive3, q4_tokens + additive4, None, None, None, None)
+
+    def _two_scale_stage2_le_contexts(self, click_map, q2, q3, q4):
+        p2 = self._resize_position(click_map, q2)
+        gate2 = self.le_stage2(torch.cat((p2, q2.mean(dim=1, keepdim=True)), dim=1))
+        gate3 = F.interpolate(gate2, size=q3.shape[-2:], mode='bilinear', align_corners=False)
+        gate4 = F.interpolate(gate2, size=q4.shape[-2:], mode='bilinear', align_corners=False)
+        beta3, beta4 = torch.sigmoid(self.le_beta3_logit), torch.sigmoid(self.le_beta4_logit)
+        return (self._to_tokens(q3 + beta3 * gate3 * q3),
+                self._to_tokens(q4 + beta4 * gate4 * q4))
 
     def _query_contexts(self, click_map, q2, q3, q4):
         """Return standard contexts plus optional separate K/V contexts for Query-PE variants."""
@@ -195,6 +258,11 @@ class TROGeoMSDetectionAblation(nn.Module):
             'h2_ind_3scale_pe_all_key': 'PE=MLP(P); add_to_K_only=True',
             'h2_ind_3scale_le_ind_res': 'Independent-LE residual gating',
             'h2_ind_3scale_le_stage2_res': 'Stage2-LE shared residual gating',
+            'h2_ind_pe_ln_amp_kv': 'PE=P*LN(MLP(P)); add_to_KV=True',
+            'h2_ind_pe_ln_amp_key': 'PE=P*LN(MLP(P)); add_to_K_only=True',
+            'h2_ind_pe_all_add': 'PE=MLP(P); add_to_KV=True',
+            'h2_ind_pe_all_key': 'PE=MLP(P); add_to_K_only=True',
+            'h2_ind_le_stage2_res': 'Stage2-LE propagated residual gating',
         }.get(self.variant, 'none')
 
     def forward(self, query_imgs, reference_imgs, click_map):
@@ -207,6 +275,10 @@ class TROGeoMSDetectionAblation(nn.Module):
             contexts, key_contexts, value_contexts = self._query_contexts(click_map, q2, q3, q4)
             z2 = self.cvopm_stage2(r2, context=contexts[0], context_key=key_contexts[0],
                                    context_value=value_contexts[0])
+        elif self.need_query_stage2:
+            q2, q3, q4 = self.encoder(query_input)
+            _, r3, r4 = self.encoder(reference_imgs)
+            self._expect('LE query stage2', q2, 192, 32, 32)
         else:
             q3, q4 = self.encoder(query_input)
             r3, r4 = self.encoder(reference_imgs)
@@ -219,6 +291,14 @@ class TROGeoMSDetectionAblation(nn.Module):
                                    context_value=value_contexts[1])
             z4 = self.cvopm_stage4(r4, context=contexts[2], context_key=key_contexts[2],
                                    context_value=value_contexts[2])
+        elif self.variant in self.TWO_SCALE_EMBED_VARIANTS:
+            context3, context4, key3, key4, value3, value4 = self._two_scale_pe_contexts(click_map, q3, q4)
+            z3 = self.cvopm_stage3(r3, context=context3, context_key=key3, context_value=value3)
+            z4 = self.cvopm_stage4(r4, context=context4, context_key=key4, context_value=value4)
+        elif self.need_query_stage2:
+            context3, context4 = self._two_scale_stage2_le_contexts(click_map, q2, q3, q4)
+            z3 = self.cvopm_stage3(r3, context=context3)
+            z4 = self.cvopm_stage4(r4, context=context4)
         else:
             z3 = self.cvopm_stage3(r3, context=self._to_tokens(q3))
             z4 = self.cvopm_stage4(r4, context=self._to_tokens(q4))
@@ -266,7 +346,11 @@ class TROGeoMSDetectionAblation(nn.Module):
             else:
                 print('[TROGeo MS detection sanity] variant={} shared_encoder=True self_attention_stage3=False '
                       'self_attention_stage4=False q3={} q4={} r3={} r4={} z3={} z4={} predictions={} '
-                      'feature_fusion=False'.format(self.variant, tuple(q3.shape), tuple(q4.shape),
-                      tuple(r3.shape), tuple(r4.shape), tuple(z3.shape), tuple(z4.shape), shapes), flush=True)
+                      'feature_fusion=False position_mode={}'.format(self.variant, tuple(q3.shape), tuple(q4.shape),
+                      tuple(r3.shape), tuple(r4.shape), tuple(z3.shape), tuple(z4.shape), shapes,
+                      self._position_mode()), flush=True)
+                if self.need_query_stage2:
+                    print('[Stage2-LE sanity] q2={} no_stage2_ca=True no_stage2_head=True'.format(
+                        tuple(q2.shape)), flush=True)
             self._logged_sanity = True
         return predictions, None
