@@ -151,6 +151,10 @@ def main():
                         help='H3: fuse two Top-1 boxes only when their pair IoU reaches this threshold')
     parser.add_argument('--trogeo_backbone', choices=('swin_s', 'swin_t', 'resnet50'), default='swin_s',
                         help='shared ImageNet backbone for TROGeo modes')
+    parser.add_argument('--trogeo_aug_mode', choices=('current', 'detgeo'), default='current',
+                        help='TROGeo train augmentation: current or original DetGeo RSDataset recipe')
+    parser.add_argument('--trogeo_position_mode', choices=('current', 'detgeo'), default='current',
+                        help='TROGeo click-position encoder: current double-conv or original DetGeo Conv-BN-Leaky')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
     parser.add_argument('--sam_multimask_root', default='', help='optional root of split-indexed SAM multi-mask npz files')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
@@ -226,6 +230,8 @@ def main():
         parser.error('--h3_iou_threshold must be in [0, 1]')
     if not trogeo_mode and args.trogeo_backbone != 'swin_s':
         parser.error('--trogeo_backbone is only valid for a TROGeo mode')
+    if not trogeo_mode and (args.trogeo_aug_mode != 'current' or args.trogeo_position_mode != 'current'):
+        parser.error('--trogeo_aug_mode and --trogeo_position_mode are only valid for TROGeo modes')
     if trogeo_mode and (args.backbone_exp != 'baseline' or args.single_scale_ca or args.b_variant != 'none'
                                or args.sam_prompt or args.gaussian_only or args.adaptive_sam_prompt
                                or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae
@@ -304,17 +310,20 @@ def main():
                          split_name='train',
                          img_size=args.img_size,
                          transform=input_transform,
-                         augment=True, **prompt_kwargs)
+                         augment=True,
+                         **({'aug_mode': args.trogeo_aug_mode} if trogeo_mode else {}), **prompt_kwargs)
     val_dataset = dataset_class(data_root=args.data_root,
                          data_name=args.data_name,
                          split_name='val',
                          img_size = args.img_size,
-                         transform=input_transform, **prompt_kwargs)
+                         transform=input_transform,
+                         **({'aug_mode': args.trogeo_aug_mode} if trogeo_mode else {}), **prompt_kwargs)
     test_dataset = dataset_class(data_root=args.data_root,
                          data_name=args.data_name,
                          split_name='test',
                          img_size = args.img_size,
-                         transform=input_transform, **prompt_kwargs)
+                         transform=input_transform,
+                         **({'aug_mode': args.trogeo_aug_mode} if trogeo_mode else {}), **prompt_kwargs)
     loader_kwargs = dict(batch_size=args.batch_size, pin_memory=True,
                          drop_last=False, num_workers=args.num_workers)
     if args.original_rng_matched or args.standard_rng:
@@ -350,7 +359,8 @@ def main():
         model = TROGeoMSDirectCASH(emb_size=args.emb_size, backbone=args.trogeo_backbone)
     elif args.trogeo_ms_det_variant != 'none':
         model = TROGeoMSDetectionAblation(emb_size=args.emb_size, backbone=args.trogeo_backbone,
-                                           variant=args.trogeo_ms_det_variant)
+                                           variant=args.trogeo_ms_det_variant,
+                                           position_mode=args.trogeo_position_mode)
     elif args.backbone_exp != 'baseline':
         model = DetGeoBackboneAblation(emb_size=args.emb_size, leaky=True, backbone_exp=args.backbone_exp)
     elif args.single_scale_ca:

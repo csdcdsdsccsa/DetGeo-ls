@@ -390,3 +390,21 @@ Run order is C -> A -> B.  Each run trains from the common ImageNet Swin-T
 initialization for 25 epochs with batch 7, workers 24, seed 2024 and lr 1e-4;
 validation selects the best checkpoint, which is tested exactly once.  The
 last-epoch checkpoint is then removed and the best checkpoint is retained.
+
+# Strict E4 controls: original DetGeo augmentation / position encoder
+
+Both controls retain E4 H2-Ind's shared Swin-T, Stage3/Stage4 Direct-CA,
+independent two-head detector, two-head loss, seed 2024, batch 7, workers 24,
+and ordinary `--standard_rng`. They start only after PGCA C -> A -> B succeeds.
+
+- `E4_H2Ind_DetGeoAug` sets `--trogeo_aug_mode detgeo` only. The train
+  satellite augmentation is copied parameter-for-parameter from original
+  `RSDataset.rs_transform`; original DetGeo has no TROGeo query-side random
+  horizontal flip. The current `double_conv(4->3)` position encoder remains.
+- `E4_H2Ind_DetGeoPE` sets `--trogeo_position_mode detgeo` only. It replaces
+  current `double_conv(4->3)` with original DetGeo
+  `ConvBatchNormReLU(4,3,1,1,0,1, leaky=True, instance=False)`. Current TROGeo
+  augmentation remains in use.
+
+Each run is validation-selected, tested exactly once with that best checkpoint,
+then only its last-epoch checkpoint is removed.

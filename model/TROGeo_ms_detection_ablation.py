@@ -7,6 +7,7 @@ import torchvision.models as models
 
 from .TROGeo_ms_direct_ca_sh import SwinTMultiStageEncoder
 from .TROGeo_wo_ost import double_conv
+from .detgeo_position_embedding import DetGeoPositionEmbedding
 from .trogeo_attention import SpatialTransformer
 
 
@@ -85,18 +86,21 @@ class TROGeoMSDetectionAblation(nn.Module):
     VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive') + \
                      THREE_SCALE_VARIANTS + TWO_SCALE_QUERY_PE_VARIANTS + TWO_SCALE_PGCA_VARIANTS
 
-    def __init__(self, emb_size=768, backbone='swin_t', variant='correct63'):
+    def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current'):
         super().__init__()
-        if emb_size != 768 or backbone != 'swin_t' or variant not in self.VALID_VARIANTS:
+        if (emb_size != 768 or backbone != 'swin_t' or variant not in self.VALID_VARIANTS
+                or position_mode not in ('current', 'detgeo')):
             raise ValueError('requires emb_size=768, backbone=swin_t, and a valid MS variant')
         self.variant = variant
+        self.position_mode = position_mode
         self.three_scale = variant in self.THREE_SCALE_VARIANTS
         # q2 is exposed only to construct the propagated LE gate; detection
         # remains strictly two-scale for this variant.
         self.need_query_stage2 = variant == 'h2_ind_le_stage2_res'
         self.encoder = (SwinTThreeStageEncoder() if (self.three_scale or self.need_query_stage2)
                         else SwinTMultiStageEncoder())
-        self.position_embedding = double_conv(4, 3)
+        self.position_embedding = (double_conv(4, 3) if position_mode == 'current'
+                                   else DetGeoPositionEmbedding())
         if self.three_scale:
             self.cvopm_stage2 = SpatialTransformer(192, 3, 64, depth=1, context_dim=192,
                                                     use_self_attention=False, query_chunk_size=512)
@@ -390,9 +394,10 @@ class TROGeoMSDetectionAblation(nn.Module):
             else:
                 print('[TROGeo MS detection sanity] variant={} shared_encoder=True self_attention_stage3=False '
                       'self_attention_stage4=False q3={} q4={} r3={} r4={} z3={} z4={} predictions={} '
-                      'feature_fusion=False position_mode={}'.format(self.variant, tuple(q3.shape), tuple(q4.shape),
+                      'feature_fusion=False position_injection={} position_encoder={}'.format(
+                      self.variant, tuple(q3.shape), tuple(q4.shape),
                       tuple(r3.shape), tuple(r4.shape), tuple(z3.shape), tuple(z4.shape), shapes,
-                      self._position_mode()), flush=True)
+                      self._position_mode(), self.position_mode), flush=True)
                 if self.need_query_stage2:
                     print('[Stage2-LE sanity] q2={} no_stage2_ca=True no_stage2_head=True'.format(
                         tuple(q2.shape)), flush=True)

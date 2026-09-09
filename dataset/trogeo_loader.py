@@ -14,7 +14,7 @@ cv2.setNumThreads(0)
 
 class TROGeoRSDataset(Dataset):
     def __init__(self, data_root, data_name='CVOGL_DroneAerial', split_name='train', img_size=1024,
-                 transform=None, augment=False):
+                 transform=None, augment=False, aug_mode='current'):
         if data_name not in ('CVOGL_DroneAerial', 'CVOGL_SVI'):
             raise ValueError('unsupported data_name: {}'.format(data_name))
         data_dir = os.path.join(data_root, data_name)
@@ -25,17 +25,35 @@ class TROGeoRSDataset(Dataset):
         self.split_name = split_name
         self.transform = transform
         self.augment = augment
+        if aug_mode not in ('current', 'detgeo'):
+            raise ValueError('aug_mode must be current or detgeo, got {}'.format(aug_mode))
+        self.aug_mode = aug_mode
         self.query_featuremap_hw = (256, 256) if data_name == 'CVOGL_DroneAerial' else (256, 512)
-        self.rs_transform = A.Compose([
-            A.RandomSizedBBoxSafeCrop(width=img_size, height=img_size, erosion_rate=0.2, p=0.4),
-            A.OneOf([
-                A.RandomRotate90(p=1.0),
-                A.Rotate(limit=[180, 180], p=1.0),
-                A.Rotate(limit=[270, 270], p=1.0),
-            ], p=0.75),
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.5),
-        ], bbox_params=A.BboxParams(format='pascal_voc'))
+        if aug_mode == 'current':
+            self.rs_transform = A.Compose([
+                A.RandomSizedBBoxSafeCrop(width=img_size, height=img_size, erosion_rate=0.2, p=0.4),
+                A.OneOf([
+                    A.RandomRotate90(p=1.0),
+                    A.Rotate(limit=[180, 180], p=1.0),
+                    A.Rotate(limit=[270, 270], p=1.0),
+                ], p=0.75),
+                A.HorizontalFlip(p=0.5),
+                A.VerticalFlip(p=0.5),
+            ], bbox_params=A.BboxParams(format='pascal_voc'))
+        else:
+            # Copied parameter-for-parameter from original DetGeo
+            # RSDataset.rs_transform. Original DetGeo does not apply the
+            # TROGeo query-side random horizontal flip below.
+            self.rs_transform = A.Compose([
+                A.RandomSizedBBoxSafeCrop(width=img_size, height=img_size, erosion_rate=0.2, p=0.2),
+                A.RandomRotate90(p=0.5),
+                A.GaussNoise(p=0.5),
+                A.HueSaturationValue(p=0.3),
+                A.OneOf([A.Blur(p=0.4), A.MedianBlur(p=0.3)], p=0.5),
+                A.OneOf([A.RandomBrightnessContrast(p=0.4), A.CLAHE(p=0.3)], p=0.5),
+                A.ToGray(p=0.2),
+                A.RandomGamma(p=0.3),
+            ], bbox_params=A.BboxParams(format='pascal_voc'))
 
     def __len__(self):
         return len(self.data_list)
@@ -53,7 +71,7 @@ class TROGeoRSDataset(Dataset):
             query = self.transform(query.copy())
             satellite = self.transform(satellite.copy())
         click_h, click_w = int(click_xy[1]), int(click_xy[0])
-        if self.split_name == 'train' and random.choice([True, False]):
+        if self.aug_mode == 'current' and self.split_name == 'train' and random.choice([True, False]):
             query = torch.flip(query, dims=[-1])
             click_w = query.shape[-1] - click_w - 1
         height, width = self.query_featuremap_hw
