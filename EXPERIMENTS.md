@@ -315,9 +315,8 @@ checkpoint once on the test split.
 | `h2_ind_3scale_le_ind_res` | independent LE maps with `q + sigmoid(beta) * A * q` |
 | `h2_ind_3scale_le_stage2_res` | Stage2 LE map resized to all scales with residual gates |
 
-The optional PE/LE modules are constructed only after E7 base modules and the
-CPU RNG state is restored afterward, so those additions do not perturb the
-baseline model's initialization stream. `tools/test_trogeo_query_pe_3scale.py`
+The optional PE/LE modules are constructed after the E7 base modules on the
+ordinary RNG trajectory; no RNG state is restored afterward. `tools/test_trogeo_query_pe_3scale.py`
 runs two optimizer steps per variant because zero-initialized CVOPM `proj_out`
 blocks PE/LE gradients on the first backward pass by design.
 
@@ -339,8 +338,8 @@ exposes Query Stage2 only to produce a single propagated spatial gate.
 
 All runs use GPU 0, Swin-T, batch 7, workers 24, seed 2024,
 `--standard_rng`, Adam, lr 1e-4, beta 1.0, 25 epochs, and no task checkpoint.
-The modules are initialized after the E4 base modules with CPU RNG restoration,
-so their optional parameters do not alter the base initialization stream.
+The optional modules are initialized after the E4 base modules without CPU RNG
+state restoration, so they naturally advance the ordinary training RNG stream.
 `tools/test_trogeo_query_pe_2scale.py` performs a two-step GPU backward check:
 the first step verifies heads and zero-initialized `proj_out`; the second
 verifies PE/LE gradients.  Results are intentionally not recorded until the

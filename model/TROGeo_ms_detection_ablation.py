@@ -128,47 +128,44 @@ class TROGeoMSDetectionAblation(nn.Module):
                     )
                     self.det_head_stage2 = nn.Conv2d(384, 45, kernel_size=1)
 
-        # Construct optional PE/LE modules after all E7 base modules, then
-        # restore RNG so their initialization cannot perturb E7's trajectory.
-        _pos_rng_state = torch.get_rng_state()
-        try:
-            if self.variant in self.QUERY_PE_VARIANTS[:3]:
-                self.pe_proj2 = _make_pe_mlp(192)
-                self.pe_proj3 = _make_pe_mlp(384)
-                self.pe_proj4 = _make_pe_mlp(768)
-                self.pe_alpha2 = nn.Parameter(torch.tensor(0.1))
-                self.pe_alpha3 = nn.Parameter(torch.tensor(0.1))
-                self.pe_alpha4 = nn.Parameter(torch.tensor(0.1))
-                if self.variant == 'h2_ind_3scale_pe_ln_amp':
-                    self.pe_norm2 = nn.LayerNorm(192)
-                    self.pe_norm3 = nn.LayerNorm(384)
-                    self.pe_norm4 = nn.LayerNorm(768)
-            elif self.variant == 'h2_ind_3scale_le_ind_res':
-                self.le_stage2 = _make_le_block()
-                self.le_stage3 = _make_le_block()
-                self.le_stage4 = _make_le_block()
-                self.le_beta2_logit = nn.Parameter(torch.tensor(-2.1972246))
-                self.le_beta3_logit = nn.Parameter(torch.tensor(-2.1972246))
-                self.le_beta4_logit = nn.Parameter(torch.tensor(-2.1972246))
-            elif self.variant == 'h2_ind_3scale_le_stage2_res':
-                self.le_stage2 = _make_le_block()
-                self.le_beta2_logit = nn.Parameter(torch.tensor(-2.1972246))
-                self.le_beta3_logit = nn.Parameter(torch.tensor(-2.1972246))
-                self.le_beta4_logit = nn.Parameter(torch.tensor(-2.1972246))
-            elif self.variant in self.TWO_SCALE_EMBED_VARIANTS:
-                self.pe_proj3 = _make_pe_mlp(384)
-                self.pe_proj4 = _make_pe_mlp(768)
-                self.pe_alpha3 = nn.Parameter(torch.tensor(0.1))
-                self.pe_alpha4 = nn.Parameter(torch.tensor(0.1))
-                if self.variant in self.TWO_SCALE_LN_AMP_VARIANTS:
-                    self.pe_norm3 = nn.LayerNorm(384)
-                    self.pe_norm4 = nn.LayerNorm(768)
-            elif self.variant == 'h2_ind_le_stage2_res':
-                self.le_stage2 = _make_le_block()
-                self.le_beta3_logit = nn.Parameter(torch.tensor(-2.1972246))
-                self.le_beta4_logit = nn.Parameter(torch.tensor(-2.1972246))
-        finally:
-            torch.set_rng_state(_pos_rng_state)
+        # PE/LE modules are initialized on the ordinary RNG trajectory.  This
+        # intentionally lets the added module consume RNG, matching the
+        # standard training protocol used for this rerun.
+        if self.variant in self.QUERY_PE_VARIANTS[:3]:
+            self.pe_proj2 = _make_pe_mlp(192)
+            self.pe_proj3 = _make_pe_mlp(384)
+            self.pe_proj4 = _make_pe_mlp(768)
+            self.pe_alpha2 = nn.Parameter(torch.tensor(0.1))
+            self.pe_alpha3 = nn.Parameter(torch.tensor(0.1))
+            self.pe_alpha4 = nn.Parameter(torch.tensor(0.1))
+            if self.variant == 'h2_ind_3scale_pe_ln_amp':
+                self.pe_norm2 = nn.LayerNorm(192)
+                self.pe_norm3 = nn.LayerNorm(384)
+                self.pe_norm4 = nn.LayerNorm(768)
+        elif self.variant == 'h2_ind_3scale_le_ind_res':
+            self.le_stage2 = _make_le_block()
+            self.le_stage3 = _make_le_block()
+            self.le_stage4 = _make_le_block()
+            self.le_beta2_logit = nn.Parameter(torch.tensor(-2.1972246))
+            self.le_beta3_logit = nn.Parameter(torch.tensor(-2.1972246))
+            self.le_beta4_logit = nn.Parameter(torch.tensor(-2.1972246))
+        elif self.variant == 'h2_ind_3scale_le_stage2_res':
+            self.le_stage2 = _make_le_block()
+            self.le_beta2_logit = nn.Parameter(torch.tensor(-2.1972246))
+            self.le_beta3_logit = nn.Parameter(torch.tensor(-2.1972246))
+            self.le_beta4_logit = nn.Parameter(torch.tensor(-2.1972246))
+        elif self.variant in self.TWO_SCALE_EMBED_VARIANTS:
+            self.pe_proj3 = _make_pe_mlp(384)
+            self.pe_proj4 = _make_pe_mlp(768)
+            self.pe_alpha3 = nn.Parameter(torch.tensor(0.1))
+            self.pe_alpha4 = nn.Parameter(torch.tensor(0.1))
+            if self.variant in self.TWO_SCALE_LN_AMP_VARIANTS:
+                self.pe_norm3 = nn.LayerNorm(384)
+                self.pe_norm4 = nn.LayerNorm(768)
+        elif self.variant == 'h2_ind_le_stage2_res':
+            self.le_stage2 = _make_le_block()
+            self.le_beta3_logit = nn.Parameter(torch.tensor(-2.1972246))
+            self.le_beta4_logit = nn.Parameter(torch.tensor(-2.1972246))
 
     @staticmethod
     def _expect(name, tensor, channels, height, width):
