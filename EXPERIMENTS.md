@@ -315,8 +315,9 @@ checkpoint once on the test split.
 | `h2_ind_3scale_le_ind_res` | independent LE maps with `q + sigmoid(beta) * A * q` |
 | `h2_ind_3scale_le_stage2_res` | Stage2 LE map resized to all scales with residual gates |
 
-The optional PE/LE modules are constructed after the E7 base modules on the
-ordinary RNG trajectory; no RNG state is restored afterward. `tools/test_trogeo_query_pe_3scale.py`
+The completed original PE/LE runs constructed optional modules only after the
+E7 base modules and restored the CPU RNG state afterward, so those additions
+did not perturb E7's initialization stream. `tools/test_trogeo_query_pe_3scale.py`
 runs two optimizer steps per variant because zero-initialized CVOPM `proj_out`
 blocks PE/LE gradients on the first backward pass by design.
 
@@ -336,10 +337,20 @@ exposes Query Stage2 only to produce a single propagated spatial gate.
 | `h2_ind_pe_all_key` | `MLP(P)` added only to K; V remains the original Query |
 | `h2_ind_le_stage2_res` | a single Stage2 LE map resized into residual Stage3/4 gates |
 
-All runs use GPU 0, Swin-T, batch 7, workers 24, seed 2024,
+The completed original runs use GPU 0, Swin-T, batch 7, workers 24, seed 2024,
 `--standard_rng`, Adam, lr 1e-4, beta 1.0, 25 epochs, and no task checkpoint.
-The optional modules are initialized after the E4 base modules without CPU RNG
-state restoration, so they naturally advance the ordinary training RNG stream.
+Their optional modules were initialized after the E4 base modules with CPU RNG
+restoration, so they did not alter the E4 base initialization stream.
+
+## E7 PE-All K/V rerun without PE initialization RNG restoration
+
+- This rerun uses the E7 three-scale topology, independent Stage2/3/4 heads,
+  equal `three_head_yolo_loss`, and `select_three_heads`; it is not an E4
+  two-scale experiment.
+- `h2_ind_3scale_pe_all_add` constructs its PE modules on the ordinary RNG
+  trajectory without `torch.get_rng_state()` / `torch.set_rng_state()`.
+- Protocol: GPU 0, Swin-T, batch 7, workers 24, seed 2024, `--standard_rng`,
+  Adam, lr 1e-4, beta 1.0, 25 epochs, validation-best selection, then one test.
 `tools/test_trogeo_query_pe_2scale.py` performs a two-step GPU backward check:
 the first step verifies heads and zero-initialized `proj_out`; the second
 verifies PE/LE gradients.  Results are intentionally not recorded until the
