@@ -419,3 +419,16 @@ over **Query K tokens** and the per-sample lambda is predicted from global-poole
 Query features. Query K/V tensors themselves are not modified. A bias produced
 solely over Satellite Q locations would add the same scalar to every K in a
 softmax row and therefore cancel; it is deliberately not used.
+# Strict E4 H2-Ind ViT backbone ablation
+
+The `vit_t` and `vit_s` variants change only E4's shared feature encoder and
+retain its two Direct-CA blocks, two independent full 9-anchor heads, two-head
+loss, and confidence-based head selection. Since plain ViTs are single-scale
+and global 4096-token attention at 1024x1024 is impractical at batch 7, the
+satellite is encoded as sixteen non-overlapping 256x256 tiles with shared
+ImageNet-pretrained `deit_tiny_patch16_224` or `deit_small_patch16_224` weights
+(standard ViT-T/ViT-S architecture with DeiT ImageNet training weights).
+Block-8 tokens form Stage3; block-12 tokens are pooled 2x for Stage4; learned
+1x1 projections preserve E4's 384/768-channel interfaces. Both runs use the
+ordinary `--standard_rng` protocol, seed 2024, batch 7, workers 24, lr 1e-4,
+and 25 epochs. Each validation-best checkpoint is tested once.

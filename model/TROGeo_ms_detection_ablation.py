@@ -9,6 +9,7 @@ from .TROGeo_ms_direct_ca_sh import SwinTMultiStageEncoder
 from .TROGeo_wo_ost import double_conv
 from .detgeo_position_embedding import DetGeoPositionEmbedding
 from .trogeo_attention import SpatialTransformer
+from .vit_multistage import TiledViTMultiStageEncoder
 
 
 def _make_pe_mlp(out_dim):
@@ -88,17 +89,23 @@ class TROGeoMSDetectionAblation(nn.Module):
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current'):
         super().__init__()
-        if (emb_size != 768 or backbone != 'swin_t' or variant not in self.VALID_VARIANTS
+        if (emb_size != 768 or backbone not in ('swin_t', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
                 or position_mode not in ('current', 'detgeo')):
-            raise ValueError('requires emb_size=768, backbone=swin_t, and a valid MS variant')
+            raise ValueError('requires emb_size=768, a supported backbone, and a valid MS variant')
+        if backbone in ('vit_t', 'vit_s') and variant != 'h2_ind':
+            raise ValueError('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
         self.variant = variant
         self.position_mode = position_mode
+        self.backbone_name = backbone
         self.three_scale = variant in self.THREE_SCALE_VARIANTS
         # q2 is exposed only to construct the propagated LE gate; detection
         # remains strictly two-scale for this variant.
         self.need_query_stage2 = variant == 'h2_ind_le_stage2_res'
-        self.encoder = (SwinTThreeStageEncoder() if (self.three_scale or self.need_query_stage2)
-                        else SwinTMultiStageEncoder())
+        if backbone in ('vit_t', 'vit_s'):
+            self.encoder = TiledViTMultiStageEncoder(backbone)
+        else:
+            self.encoder = (SwinTThreeStageEncoder() if (self.three_scale or self.need_query_stage2)
+                            else SwinTMultiStageEncoder())
         self.position_embedding = (double_conv(4, 3) if position_mode == 'current'
                                    else DetGeoPositionEmbedding())
         if self.three_scale:

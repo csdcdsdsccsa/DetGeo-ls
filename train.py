@@ -149,7 +149,7 @@ def main():
                         default='none', help='controlled Swin-T multi-scale detection ablation')
     parser.add_argument('--h3_iou_threshold', default=0.5, type=float,
                         help='H3: fuse two Top-1 boxes only when their pair IoU reaches this threshold')
-    parser.add_argument('--trogeo_backbone', choices=('swin_s', 'swin_t', 'resnet50'), default='swin_s',
+    parser.add_argument('--trogeo_backbone', choices=('swin_s', 'swin_t', 'resnet50', 'vit_t', 'vit_s'), default='swin_s',
                         help='shared ImageNet backbone for TROGeo modes')
     parser.add_argument('--trogeo_aug_mode', choices=('current', 'detgeo'), default='current',
                         help='TROGeo train augmentation: current or original DetGeo RSDataset recipe')
@@ -222,8 +222,10 @@ def main():
     trogeo_mode = any(trogeo_experiments)
     if args.trogeo_ms_direct_ca_sh and args.trogeo_backbone != 'swin_t':
         parser.error('--trogeo_ms_direct_ca_sh currently requires --trogeo_backbone swin_t')
-    if args.trogeo_ms_det_variant != 'none' and args.trogeo_backbone != 'swin_t':
-        parser.error('--trogeo_ms_det_variant requires --trogeo_backbone swin_t')
+    if args.trogeo_ms_det_variant != 'none' and args.trogeo_backbone not in ('swin_t', 'vit_t', 'vit_s'):
+        parser.error('--trogeo_ms_det_variant requires --trogeo_backbone swin_t/vit_t/vit_s')
+    if args.trogeo_backbone in ('vit_t', 'vit_s') and args.trogeo_ms_det_variant != 'h2_ind':
+        parser.error('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
     if args.trogeo_ms_det_variant in ('h3_ind', 'h3_adaptive') and not (args.test or args.val):
         parser.error('H3 variants are inference-only: train h2_ind then evaluate its best checkpoint')
     if not 0.0 <= args.h3_iou_threshold <= 1.0:
