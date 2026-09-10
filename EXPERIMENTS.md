@@ -408,3 +408,14 @@ and ordinary `--standard_rng`. They start only after PGCA C -> A -> B succeeds.
 
 Each run is validation-selected, tested exactly once with that best checkpoint,
 then only its last-epoch checkpoint is removed.
+
+# Strict E4: original DetGeo PE plus PGCA-B
+
+`E4_H2Ind_DetGeoPE_PGCA_B` composes the two validated controls without changing
+E4's two-scale structure: it uses `--trogeo_position_mode detgeo` at the input,
+then `h2_ind_pgca_b_dynamic` at Stage3/Stage4 Cross-Attention. The latter adds
+`lambda * B` before softmax, where the learned 1x1 convolution produces a bias
+over **Query K tokens** and the per-sample lambda is predicted from global-pooled
+Query features. Query K/V tensors themselves are not modified. A bias produced
+solely over Satellite Q locations would add the same scalar to every K in a
+softmax row and therefore cancel; it is deliberately not used.
