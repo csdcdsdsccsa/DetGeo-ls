@@ -128,6 +128,47 @@ def check_coarse_variants(batch):
         torch.cuda.empty_cache()
 
 
+def check_fine_guidance_variants(batch):
+    query = torch.randn(batch, 3, 256, 256, device='cuda')
+    reference = torch.randn(batch, 3, 1024, 1024, device='cuda')
+    click = torch.rand(batch, 256, 256, device='cuda')
+    target = torch.tensor([[256, 256, 512, 512]], dtype=torch.float32, device='cuda').repeat(batch, 1)
+    for variant in ('h2_ind_csfi_fg', 'h2_ind_csfi_bi'):
+        model = torch.nn.DataParallel(TROGeoMSDetectionAblation(variant=variant)).cuda().train()
+        module = model.module
+        probe_z3 = torch.randn(batch, 384, 64, 64, device='cuda')
+        probe_r4 = torch.randn(batch, 768, 32, 32, device='cuda')
+        with torch.no_grad():
+            probe_r4_guided, probe_logits, probe_down = module.fine_guidance(probe_z3, probe_r4)
+        if not torch.equal(probe_r4_guided, probe_r4) or probe_logits.shape != (batch, 1, 64, 64) or \
+                probe_down.shape != (batch, 1, 32, 32) or module.fine_guidance.gamma.item() != 0.0:
+            raise RuntimeError('{} zero-gamma fine guidance is not an exact identity'.format(variant))
+        if hasattr(module, 'cvopm_stage4_second'):
+            raise RuntimeError('A3-Bi must reuse cvopm_stage4')
+        predictions, _ = model(query, reference, click)
+        expected_keys = ({'stage3', 'stage4', 'fine_logits'} if variant == 'h2_ind_csfi_fg'
+                         else {'stage3', 'stage4', 'coarse_logits', 'fine_logits'})
+        if set(predictions) != expected_keys or predictions['stage3'].shape != (batch, 45, 64, 64) or \
+                predictions['stage4'].shape != (batch, 45, 64, 64) or \
+                predictions['fine_logits'].shape != (batch, 1, 64, 64):
+            raise RuntimeError('{} violates the dual-head fine-guidance contract'.format(variant))
+        fine_loss = coarse_heatmap_loss(predictions['fine_logits'], target, 1024, sigma=3.0)
+        loss = two_head_loss(predictions, target) + fine_loss
+        if variant == 'h2_ind_csfi_bi':
+            if predictions['coarse_logits'].shape != (batch, 1, 32, 32):
+                raise RuntimeError('A3-Bi has invalid coarse heatmap')
+            loss = loss + 0.5 * coarse_heatmap_loss(predictions['coarse_logits'], target, 1024, sigma=1.5)
+        if not torch.isfinite(loss):
+            raise RuntimeError('{} has non-finite loss'.format(variant))
+        loss.backward()
+        if not has_gradient(module.fine_guidance.fine_head.weight) or not has_gradient(module.fine_guidance.gamma):
+            raise RuntimeError('{} fine-guidance branch has zero gradient'.format(variant))
+        if variant == 'h2_ind_csfi_bi' and not has_gradient(module.coarse_guidance.coarse_head.weight):
+            raise RuntimeError('A3-Bi coarse-guidance branch has zero gradient')
+        del model, predictions
+        torch.cuda.empty_cache()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=7)
@@ -139,6 +180,7 @@ def main():
     difference = check_zero_residual()
     loss1, loss2, parameters = check_two_step_backward(args.batch_size)
     check_coarse_variants(args.batch_size)
+    check_fine_guidance_variants(args.batch_size)
     print('e4_csfi_sanity batch={} identity_max_abs={} loss1={:.6f} loss2={:.6f} '
           'params={} peak_mib={:.1f}'.format(
               args.batch_size, difference, loss1, loss2, parameters,

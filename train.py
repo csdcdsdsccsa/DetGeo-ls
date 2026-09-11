@@ -146,12 +146,15 @@ def main():
         'h2_ind_pe_ln_amp_kv', 'h2_ind_pe_ln_amp_key', 'h2_ind_pe_all_add',
         'h2_ind_pe_all_key', 'h2_ind_le_stage2_res',
         'h2_ind_pgca_c_direct', 'h2_ind_pgca_a_conv', 'h2_ind_pgca_b_dynamic',
-        'h2_ind_csfi', 'h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier'),
+        'h2_ind_csfi', 'h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier',
+        'h2_ind_csfi_fg', 'h2_ind_csfi_bi'),
                         default='none', help='controlled Swin-T multi-scale detection ablation')
     parser.add_argument('--coarse_loss_weight', default=0.2, type=float,
                         help='weight of coarse Stage4 heatmap supervision for E4 collaboration variants')
     parser.add_argument('--coarse_sigma', default=1.5, type=float,
                         help='Gaussian sigma in cells for E4 Stage4 coarse heatmap supervision')
+    parser.add_argument('--fine_sigma', default=3.0, type=float,
+                        help='Gaussian sigma in Stage3 64x64 cells for fine-guidance supervision')
     parser.add_argument('--h3_iou_threshold', default=0.5, type=float,
                         help='H3: fuse two Top-1 boxes only when their pair IoU reaches this threshold')
     parser.add_argument('--trogeo_backbone', choices=('swin_s', 'swin_t', 'resnet50', 'vit_t', 'vit_s'), default='swin_s',
@@ -583,7 +586,16 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
         p4 = predictions['stage4'].view(predictions['stage4'].shape[0], 9, 5, 64, 64)
         if include_loss:
             loss_geo, loss_cls = two_head_yolo_loss(p3, p4, ori_gt_bbox, anchors_full, args.img_size)
-            if variant in coarse_variants:
+            if variant == 'h2_ind_csfi_fg':
+                loss_aux = coarse_heatmap_loss(predictions['fine_logits'], ori_gt_bbox,
+                                               args.img_size, args.fine_sigma)
+            elif variant == 'h2_ind_csfi_bi':
+                loss_coarse = coarse_heatmap_loss(predictions['coarse_logits'], ori_gt_bbox,
+                                                  args.img_size, args.coarse_sigma)
+                loss_fine = coarse_heatmap_loss(predictions['fine_logits'], ori_gt_bbox,
+                                                args.img_size, args.fine_sigma)
+                loss_aux = 0.5 * (loss_coarse + loss_fine)
+            elif variant in coarse_variants:
                 loss_aux = coarse_heatmap_loss(predictions['coarse_logits'], ori_gt_bbox,
                                                args.img_size, args.coarse_sigma)
         else:

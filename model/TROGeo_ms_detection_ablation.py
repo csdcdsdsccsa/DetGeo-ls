@@ -90,6 +90,22 @@ class CoarseGuidance(nn.Module):
         return r3_guided, coarse_logits, coarse_up
 
 
+class FineGuidance(nn.Module):
+    """Use Stage3's cross-view response as a residual Stage4 search prior."""
+
+    def __init__(self):
+        super().__init__()
+        self.fine_head = nn.Conv2d(384, 1, kernel_size=1)
+        self.gamma = nn.Parameter(torch.tensor(0.0))
+
+    def forward(self, z3, r4):
+        fine_logits = self.fine_head(z3)
+        fine_down = F.interpolate(torch.sigmoid(fine_logits), size=r4.shape[-2:],
+                                  mode='bilinear', align_corners=False)
+        r4_guided = r4 * (1.0 + torch.tanh(self.gamma) * fine_down)
+        return r4_guided, fine_logits, fine_down
+
+
 class SwinTThreeStageEncoder(nn.Module):
     """Shared Swin-T encoder exposing stage-2, stage-3, and stage-4 feature maps."""
 
@@ -149,9 +165,15 @@ class TROGeoMSDetectionAblation(nn.Module):
     )
     # Strict E4 two-scale post-matching interaction.  This must remain
     # separate from all PE/LE and PGCA variants so that h2_ind is untouched.
-    TWO_SCALE_COLLAB_VARIANTS = ('h2_ind_csfi', 'h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier')
-    CSFI_VARIANTS = ('h2_ind_csfi', 'h2_ind_csfi_cg', 'h2_ind_hier')
-    COARSE_GUIDE_VARIANTS = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier')
+    TWO_SCALE_COLLAB_VARIANTS = (
+        'h2_ind_csfi', 'h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier',
+        'h2_ind_csfi_fg', 'h2_ind_csfi_bi')
+    CSFI_VARIANTS = (
+        'h2_ind_csfi', 'h2_ind_csfi_cg', 'h2_ind_hier',
+        'h2_ind_csfi_fg', 'h2_ind_csfi_bi')
+    COARSE_GUIDE_VARIANTS = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier', 'h2_ind_csfi_bi')
+    FINE_GUIDE_VARIANTS = ('h2_ind_csfi_fg', 'h2_ind_csfi_bi')
+    BIDIR_GUIDE_VARIANTS = ('h2_ind_csfi_bi',)
     HIER_VARIANTS = ('h2_ind_hier',)
     THREE_SCALE_VARIANTS = ('h2_ind_3scale', 'h2_ind_3scale_stage2cls05') + QUERY_PE_VARIANTS
     VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive') + \
@@ -277,6 +299,8 @@ class TROGeoMSDetectionAblation(nn.Module):
             self.cross_scale_interaction = CrossScaleFeatureInteraction()
         if self.variant in self.COARSE_GUIDE_VARIANTS:
             self.coarse_guidance = CoarseGuidance()
+        if self.variant in self.FINE_GUIDE_VARIANTS:
+            self.fine_guidance = FineGuidance()
         if self.variant in self.HIER_VARIANTS:
             self.hier_conf_alpha = nn.Parameter(torch.tensor(0.0))
 
@@ -396,7 +420,9 @@ class TROGeoMSDetectionAblation(nn.Module):
     def forward(self, query_imgs, reference_imgs, click_map):
         position_feature = self.position_embedding(torch.cat((query_imgs, click_map.unsqueeze(1)), dim=1))
         query_input = position_feature
-        csfi_gate3 = csfi_gate4 = coarse_logits = coarse_up = None
+        csfi_gate3 = csfi_gate4 = None
+        coarse_logits = coarse_up = None
+        fine_logits = fine_down = None
         if self.three_scale:
             q2, q3, q4 = self.encoder(query_input)
             r2, r3, r4 = self.encoder(reference_imgs)
@@ -416,7 +442,19 @@ class TROGeoMSDetectionAblation(nn.Module):
         self._expect('query stage4', q4, 768, 8, 8)
         self._expect('satellite stage3', r3, 384, 64, 64)
         self._expect('satellite stage4', r4, 768, 32, 32)
-        if self.variant in self.COARSE_GUIDE_VARIANTS:
+        if self.variant in self.BIDIR_GUIDE_VARIANTS:
+            # Reuse the same CA4 parameters for both passes: first to derive
+            # the coarse Stage4 prior, then to refine the final Stage4 map.
+            z4_seed = self.cvopm_stage4(r4, context=self._to_tokens(q4))
+            r3_guided, coarse_logits, coarse_up = self.coarse_guidance(z4_seed, r3)
+            z3 = self.cvopm_stage3(r3_guided, context=self._to_tokens(q3))
+            r4_guided, fine_logits, fine_down = self.fine_guidance(z3, r4)
+            z4 = self.cvopm_stage4(r4_guided, context=self._to_tokens(q4))
+        elif self.variant == 'h2_ind_csfi_fg':
+            z3 = self.cvopm_stage3(r3, context=self._to_tokens(q3))
+            r4_guided, fine_logits, fine_down = self.fine_guidance(z3, r4)
+            z4 = self.cvopm_stage4(r4_guided, context=self._to_tokens(q4))
+        elif self.variant in self.COARSE_GUIDE_VARIANTS:
             # Coarse-to-fine order is intentional: Stage4 response guides the
             # Stage3 satellite search before Stage3 Direct-CA is evaluated.
             z4 = self.cvopm_stage4(r4, context=self._to_tokens(q4))
@@ -489,6 +527,8 @@ class TROGeoMSDetectionAblation(nn.Module):
             predictions = {'stage3': p3, 'stage4': p4}
             if coarse_logits is not None:
                 predictions['coarse_logits'] = coarse_logits
+            if fine_logits is not None:
+                predictions['fine_logits'] = fine_logits
 
         if not self._logged_sanity:
             shapes = {name: tuple(value.shape) for name, value in predictions.items()}
@@ -517,6 +557,10 @@ class TROGeoMSDetectionAblation(nn.Module):
                     print('[E4-CG sanity] coarse={} coarse_up={} gamma={:.6f} hierarchical={}'.format(
                         tuple(coarse_logits.shape), tuple(coarse_up.shape), self.coarse_guidance.gamma.item(),
                         self.variant in self.HIER_VARIANTS), flush=True)
+                if self.variant in self.FINE_GUIDE_VARIANTS:
+                    print('[E4-FG sanity] fine={} fine_down={} gamma={:.6f} bidirectional={}'.format(
+                        tuple(fine_logits.shape), tuple(fine_down.shape), self.fine_guidance.gamma.item(),
+                        self.variant in self.BIDIR_GUIDE_VARIANTS), flush=True)
                 if self.need_query_stage2:
                     print('[Stage2-LE sanity] q2={} no_stage2_ca=True no_stage2_head=True'.format(
                         tuple(q2.shape)), flush=True)
