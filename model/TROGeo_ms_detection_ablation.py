@@ -253,14 +253,9 @@ class TROGeoMSDetectionAblation(nn.Module):
                 self.lambda4 = nn.Parameter(torch.tensor(0.05))
 
         if self.variant in self.TWO_SCALE_CSFI_VARIANTS:
-            # This is deliberately *local* initialization protection, not a
-            # replacement for --standard_rng.  It keeps the existing E4
-            # initialization and subsequent DataLoader RNG trajectory matched.
-            csfi_rng_state = torch.get_rng_state()
-            try:
-                self.cross_scale_interaction = CrossScaleFeatureInteraction()
-            finally:
-                torch.set_rng_state(csfi_rng_state)
+            # Keep --standard_rng's ordinary trajectory: the added module
+            # naturally consumes RNG during its own initialization.
+            self.cross_scale_interaction = CrossScaleFeatureInteraction()
 
     @staticmethod
     def _expect(name, tensor, channels, height, width):
