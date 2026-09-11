@@ -10,6 +10,7 @@ from .TROGeo_wo_ost import double_conv
 from .detgeo_position_embedding import DetGeoPositionEmbedding
 from .trogeo_attention import SpatialTransformer
 from .vit_multistage import TiledViTMultiStageEncoder
+from .habr_former import HABRFormer
 
 
 def _make_pe_mlp(out_dim):
@@ -174,11 +175,15 @@ class TROGeoMSDetectionAblation(nn.Module):
     COARSE_GUIDE_VARIANTS = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier', 'h2_ind_csfi_bi')
     FINE_GUIDE_VARIANTS = ('h2_ind_csfi_fg', 'h2_ind_csfi_bi')
     BIDIR_GUIDE_VARIANTS = ('h2_ind_csfi_bi',)
+    HABR_VARIANTS = ('h2_ind_habr_core', 'h2_ind_habr_prior', 'h2_ind_habr_adapt', 'h2_ind_habr')
+    HABR_MODE = {
+        'h2_ind_habr_core': 'core', 'h2_ind_habr_prior': 'prior',
+        'h2_ind_habr_adapt': 'adapt', 'h2_ind_habr': 'full'}
     HIER_VARIANTS = ('h2_ind_hier',)
     THREE_SCALE_VARIANTS = ('h2_ind_3scale', 'h2_ind_3scale_stage2cls05') + QUERY_PE_VARIANTS
     VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive') + \
                      THREE_SCALE_VARIANTS + TWO_SCALE_QUERY_PE_VARIANTS + TWO_SCALE_PGCA_VARIANTS + \
-                     TWO_SCALE_COLLAB_VARIANTS
+                     TWO_SCALE_COLLAB_VARIANTS + HABR_VARIANTS
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current'):
         super().__init__()
@@ -301,6 +306,9 @@ class TROGeoMSDetectionAblation(nn.Module):
             self.coarse_guidance = CoarseGuidance()
         if self.variant in self.FINE_GUIDE_VARIANTS:
             self.fine_guidance = FineGuidance()
+        if self.variant in self.HABR_VARIANTS:
+            self.habr_former = HABRFormer(mode=self.HABR_MODE[self.variant], relation_dim=256,
+                                          num_samples=4, num_heads=4, window_size=4, offset_scale=2.0)
         if self.variant in self.HIER_VARIANTS:
             self.hier_conf_alpha = nn.Parameter(torch.tensor(0.0))
 
@@ -423,6 +431,7 @@ class TROGeoMSDetectionAblation(nn.Module):
         csfi_gate3 = csfi_gate4 = None
         coarse_logits = coarse_up = None
         fine_logits = fine_down = None
+        habr_prior3_logits = habr_prior4_logits = habr_diagnostics = None
         if self.three_scale:
             q2, q3, q4 = self.encoder(query_input)
             r2, r3, r4 = self.encoder(reference_imgs)
@@ -483,7 +492,9 @@ class TROGeoMSDetectionAblation(nn.Module):
             z3 = self.cvopm_stage3(r3, context=self._to_tokens(q3))
             z4 = self.cvopm_stage4(r4, context=self._to_tokens(q4))
 
-        if self.variant in self.CSFI_VARIANTS:
+        if self.variant in self.HABR_VARIANTS:
+            z3, z4, habr_prior3_logits, habr_prior4_logits, habr_diagnostics = self.habr_former(z3, z4)
+        elif self.variant in self.CSFI_VARIANTS:
             z3, z4, csfi_gate3, csfi_gate4 = self.cross_scale_interaction(z3, z4)
 
         if self.three_scale:
@@ -529,6 +540,9 @@ class TROGeoMSDetectionAblation(nn.Module):
                 predictions['coarse_logits'] = coarse_logits
             if fine_logits is not None:
                 predictions['fine_logits'] = fine_logits
+            if habr_prior3_logits is not None:
+                predictions['habr_prior3_logits'] = habr_prior3_logits
+                predictions['habr_prior4_logits'] = habr_prior4_logits
 
         if not self._logged_sanity:
             shapes = {name: tuple(value.shape) for name, value in predictions.items()}
@@ -561,6 +575,12 @@ class TROGeoMSDetectionAblation(nn.Module):
                     print('[E4-FG sanity] fine={} fine_down={} gamma={:.6f} bidirectional={}'.format(
                         tuple(fine_logits.shape), tuple(fine_down.shape), self.fine_guidance.gamma.item(),
                         self.variant in self.BIDIR_GUIDE_VARIANTS), flush=True)
+                if self.variant in self.HABR_VARIANTS:
+                    print('[E4-HABR sanity] mode={} prior={} rounds={} lambda43={:.6f} lambda34={:.6f} '
+                          'offset_mean={:.6f}'.format(
+                              self.habr_former.mode, self.habr_former.use_prior, self.habr_former.rounds,
+                              habr_diagnostics['lambda43'].item(), habr_diagnostics['lambda34'].item(),
+                              habr_diagnostics['offset_mean'].item()), flush=True)
                 if self.need_query_stage2:
                     print('[Stage2-LE sanity] q2={} no_stage2_ca=True no_stage2_head=True'.format(
                         tuple(q2.shape)), flush=True)

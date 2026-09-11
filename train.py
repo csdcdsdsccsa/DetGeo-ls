@@ -147,7 +147,8 @@ def main():
         'h2_ind_pe_all_key', 'h2_ind_le_stage2_res',
         'h2_ind_pgca_c_direct', 'h2_ind_pgca_a_conv', 'h2_ind_pgca_b_dynamic',
         'h2_ind_csfi', 'h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier',
-        'h2_ind_csfi_fg', 'h2_ind_csfi_bi'),
+        'h2_ind_csfi_fg', 'h2_ind_csfi_bi',
+        'h2_ind_habr_core', 'h2_ind_habr_prior', 'h2_ind_habr_adapt', 'h2_ind_habr'),
                         default='none', help='controlled Swin-T multi-scale detection ablation')
     parser.add_argument('--coarse_loss_weight', default=0.2, type=float,
                         help='weight of coarse Stage4 heatmap supervision for E4 collaboration variants')
@@ -533,6 +534,7 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
     """Return decoded final boxes and, during training, the matching loss terms."""
     variant = args.trogeo_ms_det_variant
     coarse_variants = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier')
+    habr_prior_variants = ('h2_ind_habr_prior', 'h2_ind_habr_adapt', 'h2_ind_habr')
     loss_aux = None
     three_scale_variants = (
         'h2_ind_3scale', 'h2_ind_3scale_stage2cls05', 'h2_ind_3scale_pe_ln_amp',
@@ -586,7 +588,13 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
         p4 = predictions['stage4'].view(predictions['stage4'].shape[0], 9, 5, 64, 64)
         if include_loss:
             loss_geo, loss_cls = two_head_yolo_loss(p3, p4, ori_gt_bbox, anchors_full, args.img_size)
-            if variant == 'h2_ind_csfi_fg':
+            if variant in habr_prior_variants:
+                loss_prior3 = coarse_heatmap_loss(predictions['habr_prior3_logits'], ori_gt_bbox,
+                                                   args.img_size, args.fine_sigma)
+                loss_prior4 = coarse_heatmap_loss(predictions['habr_prior4_logits'], ori_gt_bbox,
+                                                   args.img_size, args.coarse_sigma)
+                loss_aux = 0.5 * (loss_prior3 + loss_prior4)
+            elif variant == 'h2_ind_csfi_fg':
                 loss_aux = coarse_heatmap_loss(predictions['fine_logits'], ori_gt_bbox,
                                                args.img_size, args.fine_sigma)
             elif variant == 'h2_ind_csfi_bi':
