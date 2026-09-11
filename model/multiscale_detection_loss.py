@@ -6,6 +6,22 @@ import torch.nn.functional as F
 from .loss import build_target, yolo_loss
 
 
+def build_coarse_heatmap(ori_gt_bboxes, image_wh, grid_size=32, sigma=1.5):
+    """Gaussian target at the Stage4 coarse-localization resolution."""
+    centers = (ori_gt_bboxes[:, :2] + ori_gt_bboxes[:, 2:]) * 0.5
+    centers = centers / float(image_wh) * grid_size
+    coordinates = torch.arange(grid_size, device=ori_gt_bboxes.device, dtype=ori_gt_bboxes.dtype)
+    yy, xx = torch.meshgrid(coordinates, coordinates, indexing='ij')
+    distance_squared = ((xx.unsqueeze(0) - centers[:, 0, None, None]) ** 2 +
+                        (yy.unsqueeze(0) - centers[:, 1, None, None]) ** 2)
+    return torch.exp(-distance_squared / (2.0 * sigma * sigma)).unsqueeze(1)
+
+
+def coarse_heatmap_loss(coarse_logits, ori_gt_bboxes, image_wh, sigma=1.5):
+    target = build_coarse_heatmap(ori_gt_bboxes, image_wh, coarse_logits.shape[-1], sigma)
+    return F.binary_cross_entropy_with_logits(coarse_logits, target, weight=1.0 + 4.0 * target)
+
+
 def multigrid_yolo_loss(pred3, pred4, ori_gt_bboxes, anchors_full, image_wh):
     """One global confidence competition over 6*64^2 + 3*32^2 candidates."""
     batch = pred3.shape[0]

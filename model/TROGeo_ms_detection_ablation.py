@@ -74,6 +74,22 @@ class CrossScaleFeatureInteraction(nn.Module):
         return z3_out, z4_out, gate3, gate4
 
 
+class CoarseGuidance(nn.Module):
+    """Use Stage4's cross-view response as a residual Stage3 search prior."""
+
+    def __init__(self):
+        super().__init__()
+        self.coarse_head = nn.Conv2d(768, 1, kernel_size=1)
+        self.gamma = nn.Parameter(torch.tensor(0.0))
+
+    def forward(self, z4, r3):
+        coarse_logits = self.coarse_head(z4)
+        coarse_up = F.interpolate(torch.sigmoid(coarse_logits), size=r3.shape[-2:],
+                                  mode='bilinear', align_corners=False)
+        r3_guided = r3 * (1.0 + torch.tanh(self.gamma) * coarse_up)
+        return r3_guided, coarse_logits, coarse_up
+
+
 class SwinTThreeStageEncoder(nn.Module):
     """Shared Swin-T encoder exposing stage-2, stage-3, and stage-4 feature maps."""
 
@@ -133,11 +149,14 @@ class TROGeoMSDetectionAblation(nn.Module):
     )
     # Strict E4 two-scale post-matching interaction.  This must remain
     # separate from all PE/LE and PGCA variants so that h2_ind is untouched.
-    TWO_SCALE_CSFI_VARIANTS = ('h2_ind_csfi',)
+    TWO_SCALE_COLLAB_VARIANTS = ('h2_ind_csfi', 'h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier')
+    CSFI_VARIANTS = ('h2_ind_csfi', 'h2_ind_csfi_cg', 'h2_ind_hier')
+    COARSE_GUIDE_VARIANTS = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier')
+    HIER_VARIANTS = ('h2_ind_hier',)
     THREE_SCALE_VARIANTS = ('h2_ind_3scale', 'h2_ind_3scale_stage2cls05') + QUERY_PE_VARIANTS
     VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive') + \
                      THREE_SCALE_VARIANTS + TWO_SCALE_QUERY_PE_VARIANTS + TWO_SCALE_PGCA_VARIANTS + \
-                     TWO_SCALE_CSFI_VARIANTS
+                     TWO_SCALE_COLLAB_VARIANTS
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current'):
         super().__init__()
@@ -252,10 +271,14 @@ class TROGeoMSDetectionAblation(nn.Module):
                 self.lambda3 = nn.Parameter(torch.tensor(0.05))
                 self.lambda4 = nn.Parameter(torch.tensor(0.05))
 
-        if self.variant in self.TWO_SCALE_CSFI_VARIANTS:
+        if self.variant in self.CSFI_VARIANTS:
             # Keep --standard_rng's ordinary trajectory: the added module
             # naturally consumes RNG during its own initialization.
             self.cross_scale_interaction = CrossScaleFeatureInteraction()
+        if self.variant in self.COARSE_GUIDE_VARIANTS:
+            self.coarse_guidance = CoarseGuidance()
+        if self.variant in self.HIER_VARIANTS:
+            self.hier_conf_alpha = nn.Parameter(torch.tensor(0.0))
 
     @staticmethod
     def _expect(name, tensor, channels, height, width):
@@ -373,7 +396,7 @@ class TROGeoMSDetectionAblation(nn.Module):
     def forward(self, query_imgs, reference_imgs, click_map):
         position_feature = self.position_embedding(torch.cat((query_imgs, click_map.unsqueeze(1)), dim=1))
         query_input = position_feature
-        csfi_gate3 = csfi_gate4 = None
+        csfi_gate3 = csfi_gate4 = coarse_logits = coarse_up = None
         if self.three_scale:
             q2, q3, q4 = self.encoder(query_input)
             r2, r3, r4 = self.encoder(reference_imgs)
@@ -393,7 +416,13 @@ class TROGeoMSDetectionAblation(nn.Module):
         self._expect('query stage4', q4, 768, 8, 8)
         self._expect('satellite stage3', r3, 384, 64, 64)
         self._expect('satellite stage4', r4, 768, 32, 32)
-        if self.three_scale:
+        if self.variant in self.COARSE_GUIDE_VARIANTS:
+            # Coarse-to-fine order is intentional: Stage4 response guides the
+            # Stage3 satellite search before Stage3 Direct-CA is evaluated.
+            z4 = self.cvopm_stage4(r4, context=self._to_tokens(q4))
+            r3_guided, coarse_logits, coarse_up = self.coarse_guidance(z4, r3)
+            z3 = self.cvopm_stage3(r3_guided, context=self._to_tokens(q3))
+        elif self.three_scale:
             z3 = self.cvopm_stage3(r3, context=contexts[1], context_key=key_contexts[1],
                                    context_value=value_contexts[1])
             z4 = self.cvopm_stage4(r4, context=contexts[2], context_key=key_contexts[2],
@@ -416,7 +445,7 @@ class TROGeoMSDetectionAblation(nn.Module):
             z3 = self.cvopm_stage3(r3, context=self._to_tokens(q3))
             z4 = self.cvopm_stage4(r4, context=self._to_tokens(q4))
 
-        if self.variant in self.TWO_SCALE_CSFI_VARIANTS:
+        if self.variant in self.CSFI_VARIANTS:
             z3, z4, csfi_gate3, csfi_gate4 = self.cross_scale_interaction(z3, z4)
 
         if self.three_scale:
@@ -439,6 +468,16 @@ class TROGeoMSDetectionAblation(nn.Module):
             self._expect('E2 p3', p3, 30, 64, 64)
             self._expect('E2 p4', p4, 15, 32, 32)
             predictions = {'stage3': p3, 'stage4': p4}
+        elif self.variant in self.HIER_VARIANTS:
+            p3 = self.det_head_stage3(z3)
+            prior = F.interpolate(torch.sigmoid(coarse_logits), size=p3.shape[-2:],
+                                  mode='bilinear', align_corners=False)
+            p3_view = p3.view(p3.shape[0], 9, 5, 64, 64)
+            p3_view[:, :, 4] = p3_view[:, :, 4] + torch.tanh(self.hier_conf_alpha) * \
+                                (2.0 * prior - 1.0).squeeze(1).unsqueeze(1)
+            p3 = p3_view.view_as(p3)
+            self._expect('Hier p3', p3, 45, 64, 64)
+            predictions = {'stage3': p3, 'coarse_logits': coarse_logits}
         else:
             aligned4 = self.stage4_align(z4)
             if self.variant == 'h2_shared':
@@ -448,6 +487,8 @@ class TROGeoMSDetectionAblation(nn.Module):
             self._expect('H p3', p3, 45, 64, 64)
             self._expect('H p4', p4, 45, 64, 64)
             predictions = {'stage3': p3, 'stage4': p4}
+            if coarse_logits is not None:
+                predictions['coarse_logits'] = coarse_logits
 
         if not self._logged_sanity:
             shapes = {name: tuple(value.shape) for name, value in predictions.items()}
@@ -465,13 +506,17 @@ class TROGeoMSDetectionAblation(nn.Module):
                       'feature_fusion={} position_injection={} position_encoder={}'.format(
                       self.variant, tuple(q3.shape), tuple(q4.shape),
                       tuple(r3.shape), tuple(r4.shape), tuple(z3.shape), tuple(z4.shape), shapes,
-                      self.variant in self.TWO_SCALE_CSFI_VARIANTS, self._position_mode(), self.position_mode), flush=True)
-                if self.variant in self.TWO_SCALE_CSFI_VARIANTS:
+                      self.variant in self.CSFI_VARIANTS, self._position_mode(), self.position_mode), flush=True)
+                if self.variant in self.CSFI_VARIANTS:
                     print('[E4-CSFI sanity] gate3_mean={:.6f} gate4_mean={:.6f} '
                           'alpha3={:.6f} alpha4={:.6f}'.format(
                               csfi_gate3.mean().item(), csfi_gate4.mean().item(),
                               self.cross_scale_interaction.alpha3.item(),
                               self.cross_scale_interaction.alpha4.item()), flush=True)
+                if self.variant in self.COARSE_GUIDE_VARIANTS:
+                    print('[E4-CG sanity] coarse={} coarse_up={} gamma={:.6f} hierarchical={}'.format(
+                        tuple(coarse_logits.shape), tuple(coarse_up.shape), self.coarse_guidance.gamma.item(),
+                        self.variant in self.HIER_VARIANTS), flush=True)
                 if self.need_query_stage2:
                     print('[Stage2-LE sanity] q2={} no_stage2_ca=True no_stage2_head=True'.format(
                         tuple(q2.shape)), flush=True)

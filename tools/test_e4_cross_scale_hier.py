@@ -5,7 +5,7 @@ import argparse
 import torch
 
 from model.TROGeo_ms_detection_ablation import TROGeoMSDetectionAblation
-from model.multiscale_detection_loss import two_head_yolo_loss
+from model.multiscale_detection_loss import coarse_heatmap_loss, two_head_yolo_loss
 
 
 ANCHORS = torch.tensor(
@@ -17,15 +17,6 @@ def has_gradient(parameter):
     return parameter.grad is not None and bool(torch.count_nonzero(parameter.grad))
 
 
-def assert_base_state_matches(baseline, csfi):
-    baseline_state = baseline.state_dict()
-    csfi_state = csfi.state_dict()
-    base_keys = [key for key in baseline_state if not key.startswith('cross_scale_interaction.')]
-    mismatched = [key for key in base_keys if not torch.equal(baseline_state[key], csfi_state[key])]
-    if mismatched:
-        raise RuntimeError('E4 base initialization mismatch: {}'.format(', '.join(mismatched[:5])))
-
-
 def two_head_loss(predictions, target):
     batch = target.shape[0]
     p3 = predictions['stage3'].view(batch, 9, 5, 64, 64)
@@ -34,25 +25,17 @@ def two_head_loss(predictions, target):
     return geo + cls
 
 
-def check_zero_gate_equivalence(batch):
-    torch.manual_seed(2024)
-    baseline = TROGeoMSDetectionAblation(variant='h2_ind').cuda().eval()
-    torch.manual_seed(2024)
-    csfi = TROGeoMSDetectionAblation(variant='h2_ind_csfi').cuda().eval()
-    assert_base_state_matches(baseline, csfi)
-
-    torch.manual_seed(99)
-    query = torch.randn(batch, 3, 256, 256, device='cuda')
-    reference = torch.randn(batch, 3, 1024, 1024, device='cuda')
-    click = torch.rand(batch, 256, 256, device='cuda')
+def check_zero_residual():
+    """Zero-initialized CSFI gates must be an identity within the same model."""
+    module = TROGeoMSDetectionAblation(variant='h2_ind_csfi').cuda().eval().cross_scale_interaction
+    z3 = torch.randn(2, 384, 64, 64, device='cuda')
+    z4 = torch.randn(2, 768, 32, 32, device='cuda')
     with torch.no_grad():
-        baseline_predictions, _ = baseline(query, reference, click)
-        csfi_predictions, _ = csfi(query, reference, click)
-    max_difference = max((baseline_predictions[name] - csfi_predictions[name]).abs().max().item()
-                         for name in ('stage3', 'stage4'))
-    if max_difference != 0.0:
-        raise RuntimeError('zero-gate E4 equivalence failed: max_abs_diff={}'.format(max_difference))
-    del baseline, csfi, baseline_predictions, csfi_predictions
+        out3, out4, _, _ = module(z3, z4)
+    max_difference = max((out3 - z3).abs().max().item(), (out4 - z4).abs().max().item())
+    if max_difference != 0.0 or module.alpha3.item() != 0.0 or module.alpha4.item() != 0.0:
+        raise RuntimeError('CSFI zero-gate residual is not an exact identity')
+    del module, z3, z4, out3, out4
     torch.cuda.empty_cache()
     return max_difference
 
@@ -95,6 +78,56 @@ def check_two_step_backward(batch):
     return loss1.item(), loss2.item(), sum(parameter.numel() for parameter in model.parameters())
 
 
+def check_coarse_variants(batch):
+    query = torch.randn(batch, 3, 256, 256, device='cuda')
+    reference = torch.randn(batch, 3, 1024, 1024, device='cuda')
+    click = torch.rand(batch, 256, 256, device='cuda')
+    target = torch.tensor([[256, 256, 512, 512]], dtype=torch.float32, device='cuda').repeat(batch, 1)
+    for variant in ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier'):
+        model = torch.nn.DataParallel(TROGeoMSDetectionAblation(variant=variant)).cuda().train()
+        module = model.module
+        # gamma=0 must leave the Stage3 satellite feature exactly unchanged;
+        # this is a residual-initialization test, not an RNG comparison.
+        probe_z4 = torch.randn(batch, 768, 32, 32, device='cuda')
+        probe_r3 = torch.randn(batch, 384, 64, 64, device='cuda')
+        with torch.no_grad():
+            probe_r3_guided, probe_logits, probe_up = module.coarse_guidance(probe_z4, probe_r3)
+        if not torch.equal(probe_r3_guided, probe_r3) or probe_logits.shape != (batch, 1, 32, 32) or \
+                probe_up.shape != (batch, 1, 64, 64):
+            raise RuntimeError('{} zero-gamma coarse guidance is not an identity'.format(variant))
+        before_head = {}
+        hook = None
+        if variant == 'h2_ind_hier':
+            hook = module.det_head_stage3.register_forward_hook(
+                lambda _layer, _inputs, output: before_head.setdefault('prediction', output.detach().clone()))
+        predictions, _ = model(query, reference, click)
+        if hook is not None:
+            hook.remove()
+        if predictions['coarse_logits'].shape != (batch, 1, 32, 32):
+            raise RuntimeError('{} has invalid coarse heatmap shape'.format(variant))
+        if module.coarse_guidance.gamma.item() != 0.0:
+            raise RuntimeError('{} gamma must be zero initialized'.format(variant))
+        if variant == 'h2_ind_hier':
+            if set(predictions) != {'stage3', 'coarse_logits'}:
+                raise RuntimeError('hierarchical variant must decode Stage3 only')
+            loss = coarse_heatmap_loss(predictions['coarse_logits'], target, 1024)
+            if module.hier_conf_alpha.item() != 0.0:
+                raise RuntimeError('hier_conf_alpha must be zero initialized')
+            if not torch.equal(predictions['stage3'], before_head['prediction']):
+                raise RuntimeError('zero hierarchical confidence prior changed Stage3 predictions')
+        else:
+            if set(predictions) != {'stage3', 'stage4', 'coarse_logits'}:
+                raise RuntimeError('{} must retain both E4 heads'.format(variant))
+            loss = two_head_loss(predictions, target) + coarse_heatmap_loss(predictions['coarse_logits'], target, 1024)
+        if not torch.isfinite(loss):
+            raise RuntimeError('{} has non-finite coarse loss'.format(variant))
+        loss.backward()
+        if not has_gradient(module.coarse_guidance.coarse_head.weight):
+            raise RuntimeError('{} coarse head has zero gradient'.format(variant))
+        del model, predictions
+        torch.cuda.empty_cache()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=7)
@@ -103,8 +136,9 @@ def main():
         raise RuntimeError('a CUDA GPU is required')
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    difference = check_zero_gate_equivalence(args.batch_size)
+    difference = check_zero_residual()
     loss1, loss2, parameters = check_two_step_backward(args.batch_size)
+    check_coarse_variants(args.batch_size)
     print('e4_csfi_sanity batch={} identity_max_abs={} loss1={:.6f} loss2={:.6f} '
           'params={} peak_mib={:.1f}'.format(
               args.batch_size, difference, loss1, loss2, parameters,

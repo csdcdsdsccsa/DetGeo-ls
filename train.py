@@ -41,9 +41,9 @@ from model.TROGeo_ms_direct_ca_sh import TROGeoMSDirectCASH
 from model.TROGeo_ms_detection_ablation import TROGeoMSDetectionAblation
 from model.loss import yolo_loss, build_target, adjust_learning_rate
 from model.multiscale_detection_loss import (multigrid_yolo_loss, two_head_yolo_loss, three_head_yolo_loss,
-                                             three_head_yolo_loss_stage2_cls_half)
+                                             three_head_yolo_loss_stage2_cls_half, coarse_heatmap_loss)
 from utils.utils import AverageMeter, eval_iou_acc
-from utils.multiscale_detection import decode_multigrid_top1, select_two_heads, select_three_heads, eval_decoded_boxes
+from utils.multiscale_detection import decode_multigrid_top1, decode_top1, select_two_heads, select_three_heads, eval_decoded_boxes
 from utils.checkpoint import save_checkpoint, load_pretrain
 
 
@@ -146,8 +146,12 @@ def main():
         'h2_ind_pe_ln_amp_kv', 'h2_ind_pe_ln_amp_key', 'h2_ind_pe_all_add',
         'h2_ind_pe_all_key', 'h2_ind_le_stage2_res',
         'h2_ind_pgca_c_direct', 'h2_ind_pgca_a_conv', 'h2_ind_pgca_b_dynamic',
-        'h2_ind_csfi'),
+        'h2_ind_csfi', 'h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier'),
                         default='none', help='controlled Swin-T multi-scale detection ablation')
+    parser.add_argument('--coarse_loss_weight', default=0.2, type=float,
+                        help='weight of coarse Stage4 heatmap supervision for E4 collaboration variants')
+    parser.add_argument('--coarse_sigma', default=1.5, type=float,
+                        help='Gaussian sigma in cells for E4 Stage4 coarse heatmap supervision')
     parser.add_argument('--h3_iou_threshold', default=0.5, type=float,
                         help='H3: fuse two Top-1 boxes only when their pair IoU reaches this threshold')
     parser.add_argument('--trogeo_backbone', choices=('swin_s', 'swin_t', 'resnet50', 'vit_t', 'vit_s'), default='swin_s',
@@ -525,6 +529,8 @@ def is_ms_detection_variant(args):
 def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, include_loss=True):
     """Return decoded final boxes and, during training, the matching loss terms."""
     variant = args.trogeo_ms_det_variant
+    coarse_variants = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier')
+    loss_aux = None
     three_scale_variants = (
         'h2_ind_3scale', 'h2_ind_3scale_stage2cls05', 'h2_ind_3scale_pe_ln_amp',
         'h2_ind_3scale_pe_all_add', 'h2_ind_3scale_pe_all_key', 'h2_ind_3scale_le_ind_res',
@@ -561,11 +567,25 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
             loss_geo = loss_cls = None
         final_box = decode_multigrid_top1(p3, p4, anchors_full, args.img_size)
         diagnostics = {}
+    elif variant == 'h2_ind_hier':
+        p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)
+        target, best = build_target(ori_gt_bbox, anchors_full, args.img_size, 64)
+        if include_loss:
+            loss_geo, loss_cls = yolo_loss(p3, target, anchors_full, best, args.img_size)
+            loss_aux = coarse_heatmap_loss(predictions['coarse_logits'], ori_gt_bbox,
+                                           args.img_size, args.coarse_sigma)
+        else:
+            loss_geo = loss_cls = None
+        final_box, _ = decode_top1(p3, anchors_full, args.img_size)
+        diagnostics = {}
     else:
         p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)
         p4 = predictions['stage4'].view(predictions['stage4'].shape[0], 9, 5, 64, 64)
         if include_loss:
             loss_geo, loss_cls = two_head_yolo_loss(p3, p4, ori_gt_bbox, anchors_full, args.img_size)
+            if variant in coarse_variants:
+                loss_aux = coarse_heatmap_loss(predictions['coarse_logits'], ori_gt_bbox,
+                                               args.img_size, args.coarse_sigma)
         else:
             loss_geo = loss_cls = None
         final_box, diagnostics = select_two_heads(
@@ -573,7 +593,7 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
             fusion=variant in ('h3_ind', 'h3_adaptive'),
             iou_threshold=args.h3_iou_threshold,
             adaptive=(variant == 'h3_adaptive'))
-    return loss_geo, loss_cls, final_box, diagnostics
+    return loss_geo, loss_cls, loss_aux, final_box, diagnostics
 
 
 def train_epoch(train_loader, model, optimizer, epoch, args):
@@ -622,7 +642,7 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
 
         prediction_output, _ = forward_model(model, query_imgs, rs_imgs, mat_clickxy, prompt_maps)
         if is_ms_detection_variant(args):
-            loss_geo, loss_cls, final_box, _ = _ms_predictions_and_loss(
+            loss_geo, loss_cls, loss_aux, final_box, _ = _ms_predictions_and_loss(
                 prediction_output, ori_gt_bbox, anchors_full, args, include_loss=True)
             accu, _, iou, accu_center = eval_decoded_boxes(final_box, ori_gt_bbox, args.img_size)
         else:
@@ -634,6 +654,8 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
                 best_anchor_gi_gj[:, 1], best_anchor_gi_gj[:, 2], args.img_size, iou_threshold_list=[0.5])
             accu = accu_list[0]
         loss = loss_cls + loss_geo * args.beta
+        if loss_aux is not None:
+            loss = loss + args.coarse_loss_weight * loss_aux
 
         optimizer.zero_grad()
         loss.backward()
@@ -694,7 +716,7 @@ def test_epoch(data_loader, model, args):
         with torch.no_grad():
             prediction_output, attn_score = forward_model(model, query_imgs, rs_imgs, mat_clickxy, prompt_maps)
             if is_ms_detection_variant(args):
-                _, _, final_box, diagnostics = _ms_predictions_and_loss(
+                _, _, _, final_box, diagnostics = _ms_predictions_and_loss(
                     prediction_output, ori_gt_bbox, anchors_full, args, include_loss=False)
                 accu50, accu25, iou, accu_center = eval_decoded_boxes(final_box, ori_gt_bbox, args.img_size)
                 accu_list = [accu50, accu25]
