@@ -26,6 +26,54 @@ def _make_le_block():
     )
 
 
+class CrossScaleFeatureInteraction(nn.Module):
+    """Bidirectional, gated residual interaction after E4's Direct-CA maps.
+
+    ``alpha3`` and ``alpha4`` start at zero, so this module is exactly an
+    identity mapping at initialization.  The two residual updates are computed
+    from the original (not sequentially updated) maps.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.proj_4to3 = nn.Sequential(
+            nn.Conv2d(768, 384, kernel_size=1, bias=False),
+            nn.GroupNorm(32, 384),
+            nn.GELU(),
+        )
+        self.gate3 = nn.Sequential(
+            nn.Conv2d(768, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.GroupNorm(8, 64),
+            nn.GELU(),
+            nn.Conv2d(64, 1, kernel_size=1),
+            nn.Sigmoid(),
+        )
+        self.proj_3to4 = nn.Sequential(
+            nn.Conv2d(384, 768, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.GroupNorm(32, 768),
+            nn.GELU(),
+        )
+        self.gate4 = nn.Sequential(
+            nn.Conv2d(1536, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.GroupNorm(8, 64),
+            nn.GELU(),
+            nn.Conv2d(64, 1, kernel_size=1),
+            nn.Sigmoid(),
+        )
+        self.alpha3 = nn.Parameter(torch.tensor(0.0))
+        self.alpha4 = nn.Parameter(torch.tensor(0.0))
+
+    def forward(self, z3, z4):
+        z4_to3 = F.interpolate(self.proj_4to3(z4), size=z3.shape[-2:],
+                                mode='bilinear', align_corners=False)
+        z3_to4 = self.proj_3to4(z3)
+        gate3 = self.gate3(torch.cat((z3, z4_to3), dim=1))
+        gate4 = self.gate4(torch.cat((z4, z3_to4), dim=1))
+        z3_out = z3 + torch.tanh(self.alpha3) * gate3 * z4_to3
+        z4_out = z4 + torch.tanh(self.alpha4) * gate4 * z3_to4
+        return z3_out, z4_out, gate3, gate4
+
+
 class SwinTThreeStageEncoder(nn.Module):
     """Shared Swin-T encoder exposing stage-2, stage-3, and stage-4 feature maps."""
 
@@ -83,9 +131,13 @@ class TROGeoMSDetectionAblation(nn.Module):
         'h2_ind_pgca_a_conv',
         'h2_ind_pgca_b_dynamic',
     )
+    # Strict E4 two-scale post-matching interaction.  This must remain
+    # separate from all PE/LE and PGCA variants so that h2_ind is untouched.
+    TWO_SCALE_CSFI_VARIANTS = ('h2_ind_csfi',)
     THREE_SCALE_VARIANTS = ('h2_ind_3scale', 'h2_ind_3scale_stage2cls05') + QUERY_PE_VARIANTS
     VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive') + \
-                     THREE_SCALE_VARIANTS + TWO_SCALE_QUERY_PE_VARIANTS + TWO_SCALE_PGCA_VARIANTS
+                     THREE_SCALE_VARIANTS + TWO_SCALE_QUERY_PE_VARIANTS + TWO_SCALE_PGCA_VARIANTS + \
+                     TWO_SCALE_CSFI_VARIANTS
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current'):
         super().__init__()
@@ -199,6 +251,16 @@ class TROGeoMSDetectionAblation(nn.Module):
                 # fixed across samples and starts as a small residual (0.05).
                 self.lambda3 = nn.Parameter(torch.tensor(0.05))
                 self.lambda4 = nn.Parameter(torch.tensor(0.05))
+
+        if self.variant in self.TWO_SCALE_CSFI_VARIANTS:
+            # This is deliberately *local* initialization protection, not a
+            # replacement for --standard_rng.  It keeps the existing E4
+            # initialization and subsequent DataLoader RNG trajectory matched.
+            csfi_rng_state = torch.get_rng_state()
+            try:
+                self.cross_scale_interaction = CrossScaleFeatureInteraction()
+            finally:
+                torch.set_rng_state(csfi_rng_state)
 
     @staticmethod
     def _expect(name, tensor, channels, height, width):
@@ -316,6 +378,7 @@ class TROGeoMSDetectionAblation(nn.Module):
     def forward(self, query_imgs, reference_imgs, click_map):
         position_feature = self.position_embedding(torch.cat((query_imgs, click_map.unsqueeze(1)), dim=1))
         query_input = position_feature
+        csfi_gate3 = csfi_gate4 = None
         if self.three_scale:
             q2, q3, q4 = self.encoder(query_input)
             r2, r3, r4 = self.encoder(reference_imgs)
@@ -357,6 +420,9 @@ class TROGeoMSDetectionAblation(nn.Module):
         else:
             z3 = self.cvopm_stage3(r3, context=self._to_tokens(q3))
             z4 = self.cvopm_stage4(r4, context=self._to_tokens(q4))
+
+        if self.variant in self.TWO_SCALE_CSFI_VARIANTS:
+            z3, z4, csfi_gate3, csfi_gate4 = self.cross_scale_interaction(z3, z4)
 
         if self.three_scale:
             p2 = self.det_head_stage2(self.stage2_align(z2))
@@ -401,10 +467,16 @@ class TROGeoMSDetectionAblation(nn.Module):
             else:
                 print('[TROGeo MS detection sanity] variant={} shared_encoder=True self_attention_stage3=False '
                       'self_attention_stage4=False q3={} q4={} r3={} r4={} z3={} z4={} predictions={} '
-                      'feature_fusion=False position_injection={} position_encoder={}'.format(
+                      'feature_fusion={} position_injection={} position_encoder={}'.format(
                       self.variant, tuple(q3.shape), tuple(q4.shape),
                       tuple(r3.shape), tuple(r4.shape), tuple(z3.shape), tuple(z4.shape), shapes,
-                      self._position_mode(), self.position_mode), flush=True)
+                      self.variant in self.TWO_SCALE_CSFI_VARIANTS, self._position_mode(), self.position_mode), flush=True)
+                if self.variant in self.TWO_SCALE_CSFI_VARIANTS:
+                    print('[E4-CSFI sanity] gate3_mean={:.6f} gate4_mean={:.6f} '
+                          'alpha3={:.6f} alpha4={:.6f}'.format(
+                              csfi_gate3.mean().item(), csfi_gate4.mean().item(),
+                              self.cross_scale_interaction.alpha3.item(),
+                              self.cross_scale_interaction.alpha4.item()), flush=True)
                 if self.need_query_stage2:
                     print('[Stage2-LE sanity] q2={} no_stage2_ca=True no_stage2_head=True'.format(
                         tuple(q2.shape)), flush=True)
