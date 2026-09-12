@@ -568,7 +568,7 @@ def get_rccd_weight(epoch, args):
 def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, include_loss=True):
     """Return decoded final boxes and, during training, the matching loss terms."""
     variant = args.trogeo_ms_det_variant
-    coarse_variants = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier',
+    coarse_variants = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier', 'h2_ind_cg_amhcsfi_res',
                        'h2_ind_csfi_cg_channel', 'h2_ind_csfi_cg_dir', 'h2_ind_csfi_cg_ar',
                        'h2_ind_cg_habr_prior')
     habr_prior_variants = ('h2_ind_habr_prior', 'h2_ind_habr_adapt', 'h2_ind_habr')
@@ -631,11 +631,11 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
                 loss_prior4 = coarse_heatmap_loss(predictions['habr_prior4_logits'], ori_gt_bbox,
                                                    args.img_size, args.coarse_sigma)
                 loss_aux = 0.5 * (loss_prior3 + loss_prior4)
-            elif variant in ('h2_ind_csfi_fg', 'h2_ind_fg_nocsfi'):
+            elif variant in ('h2_ind_csfi_fg', 'h2_ind_fg_nocsfi', 'h2_ind_fg_amhcsfi_res'):
                 loss_aux = coarse_heatmap_loss(predictions['fine_logits'], ori_gt_bbox,
                                                args.img_size, args.fine_sigma)
             elif variant in ('h2_ind_csfi_bi', 'h2_ind_bi_nocsfi', 'h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi',
-                             'h2_ind_amhcsfi_res_bi', 'h2_ind_cg_amhcsfi_res', 'h2_ind_fg_amhcsfi_res'):
+                             'h2_ind_amhcsfi_res_bi'):
                 loss_coarse = coarse_heatmap_loss(predictions['coarse_logits'], ori_gt_bbox,
                                                   args.img_size, args.coarse_sigma)
                 loss_fine = coarse_heatmap_loss(predictions['fine_logits'], ori_gt_bbox,
