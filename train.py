@@ -177,6 +177,8 @@ def main():
                         help='TROGeo train augmentation: current or original DetGeo RSDataset recipe')
     parser.add_argument('--trogeo_position_mode', choices=('current', 'detgeo'), default='current',
                         help='TROGeo click-position encoder: current double-conv or original DetGeo Conv-BN-Leaky')
+    parser.add_argument('--trogeo_click_map_mode', choices=('distance', 'gaussian'), default='distance',
+                        help='TROGeo click map: original distance-decay map or fixed Gaussian map')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
     parser.add_argument('--sam_multimask_root', default='', help='optional root of split-indexed SAM multi-mask npz files')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
@@ -259,8 +261,9 @@ def main():
         parser.error('--h3_iou_threshold must be in [0, 1]')
     if not trogeo_mode and args.trogeo_backbone != 'swin_s':
         parser.error('--trogeo_backbone is only valid for a TROGeo mode')
-    if not trogeo_mode and (args.trogeo_aug_mode != 'current' or args.trogeo_position_mode != 'current'):
-        parser.error('--trogeo_aug_mode and --trogeo_position_mode are only valid for TROGeo modes')
+    if not trogeo_mode and (args.trogeo_aug_mode != 'current' or args.trogeo_position_mode != 'current'
+                            or args.trogeo_click_map_mode != 'distance'):
+        parser.error('--trogeo_aug_mode, --trogeo_position_mode and --trogeo_click_map_mode are only valid for TROGeo modes')
     if trogeo_mode and (args.backbone_exp != 'baseline' or args.single_scale_ca or args.b_variant != 'none'
                                or args.sam_prompt or args.gaussian_only or args.adaptive_sam_prompt
                                or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae
@@ -308,7 +311,7 @@ def main():
 
     if trogeo_mode:
         dataset_class = TROGeoRSDataset
-        prompt_kwargs = {}
+        prompt_kwargs = {'click_map_mode': args.trogeo_click_map_mode, 'gaussian_sigma': args.gaussian_sigma}
     elif args.backbone_exp != 'baseline':
         # Backbone ablations retain the original square-position RSDataset.
         dataset_class = RSDataset

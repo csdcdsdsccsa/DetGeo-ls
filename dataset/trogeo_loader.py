@@ -14,7 +14,7 @@ cv2.setNumThreads(0)
 
 class TROGeoRSDataset(Dataset):
     def __init__(self, data_root, data_name='CVOGL_DroneAerial', split_name='train', img_size=1024,
-                 transform=None, augment=False, aug_mode='current'):
+                 transform=None, augment=False, aug_mode='current', click_map_mode='distance', gaussian_sigma=25.0):
         if data_name not in ('CVOGL_DroneAerial', 'CVOGL_SVI'):
             raise ValueError('unsupported data_name: {}'.format(data_name))
         data_dir = os.path.join(data_root, data_name)
@@ -28,6 +28,12 @@ class TROGeoRSDataset(Dataset):
         if aug_mode not in ('current', 'detgeo'):
             raise ValueError('aug_mode must be current or detgeo, got {}'.format(aug_mode))
         self.aug_mode = aug_mode
+        if click_map_mode not in ('distance', 'gaussian'):
+            raise ValueError('click_map_mode must be distance or gaussian, got {}'.format(click_map_mode))
+        if gaussian_sigma <= 0:
+            raise ValueError('gaussian_sigma must be > 0')
+        self.click_map_mode = click_map_mode
+        self.gaussian_sigma = float(gaussian_sigma)
         self.query_featuremap_hw = (256, 256) if data_name == 'CVOGL_DroneAerial' else (256, 512)
         if aug_mode == 'current':
             self.rs_transform = A.Compose([
@@ -74,9 +80,22 @@ class TROGeoRSDataset(Dataset):
         if self.aug_mode == 'current' and self.split_name == 'train' and random.choice([True, False]):
             query = torch.flip(query, dims=[-1])
             click_w = query.shape[-1] - click_w - 1
-        height, width = self.query_featuremap_hw
+        click_map = self.make_click_map(self.query_featuremap_hw, click_h, click_w,
+                                        self.click_map_mode, self.gaussian_sigma)
+        return query, satellite, click_map, bbox.astype(np.float32), index
+
+    @staticmethod
+    def make_click_map(shape, click_h, click_w, mode='distance', gaussian_sigma=25.0):
+        """Return the single float32 click channel used by the TROGeo front end."""
+        height, width = shape
         rows = np.arange(height, dtype=np.float32)[:, None]
         cols = np.arange(width, dtype=np.float32)[None, :]
-        norm = float((height * height + width * width) ** 0.5)
-        click_map = (1.0 - np.sqrt((rows - click_h) ** 2 + (cols - click_w) ** 2) / norm) ** 2
-        return query, satellite, click_map.astype(np.float32), bbox.astype(np.float32), index
+        dist2 = (rows - click_h) ** 2 + (cols - click_w) ** 2
+        if mode == 'gaussian':
+            click_map = np.exp(-dist2 / (2.0 * float(gaussian_sigma) ** 2))
+        elif mode == 'distance':
+            norm = float((height * height + width * width) ** 0.5)
+            click_map = (1.0 - np.sqrt(dist2) / norm) ** 2
+        else:
+            raise ValueError('click map mode must be distance or gaussian, got {}'.format(mode))
+        return click_map.astype(np.float32)
