@@ -83,7 +83,7 @@ def check_coarse_variants(batch):
     reference = torch.randn(batch, 3, 1024, 1024, device='cuda')
     click = torch.rand(batch, 256, 256, device='cuda')
     target = torch.tensor([[256, 256, 512, 512]], dtype=torch.float32, device='cuda').repeat(batch, 1)
-    for variant in ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier'):
+    for variant in ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier', 'h2_ind_cg_amhcsfi_res'):
         model = torch.nn.DataParallel(TROGeoMSDetectionAblation(variant=variant)).cuda().train()
         module = model.module
         # gamma=0 must leave the Stage3 satellite feature exactly unchanged;
@@ -133,9 +133,14 @@ def check_fine_guidance_variants(batch):
     reference = torch.randn(batch, 3, 1024, 1024, device='cuda')
     click = torch.rand(batch, 256, 256, device='cuda')
     target = torch.tensor([[256, 256, 512, 512]], dtype=torch.float32, device='cuda').repeat(batch, 1)
-    for variant in ('h2_ind_csfi_fg', 'h2_ind_csfi_bi'):
+    no_csfi_variants = ('h2_ind_fg_nocsfi', 'h2_ind_bi_nocsfi')
+    bidir_variants = ('h2_ind_csfi_bi', 'h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi',
+                      'h2_ind_amhcsfi_res_bi', 'h2_ind_bi_nocsfi')
+    for variant in ('h2_ind_csfi_fg', 'h2_ind_fg_amhcsfi_res') + bidir_variants + no_csfi_variants[:1]:
         model = torch.nn.DataParallel(TROGeoMSDetectionAblation(variant=variant)).cuda().train()
         module = model.module
+        if variant in no_csfi_variants and hasattr(module, 'cross_scale_interaction'):
+            raise RuntimeError('{} must not register CSFI'.format(variant))
         probe_z3 = torch.randn(batch, 384, 64, 64, device='cuda')
         probe_r4 = torch.randn(batch, 768, 32, 32, device='cuda')
         with torch.no_grad():
@@ -146,7 +151,8 @@ def check_fine_guidance_variants(batch):
         if hasattr(module, 'cvopm_stage4_second'):
             raise RuntimeError('A3-Bi must reuse cvopm_stage4')
         predictions, _ = model(query, reference, click)
-        expected_keys = ({'stage3', 'stage4', 'fine_logits'} if variant == 'h2_ind_csfi_fg'
+        expected_keys = ({'stage3', 'stage4', 'fine_logits'} if variant in ('h2_ind_csfi_fg', 'h2_ind_fg_nocsfi',
+                                                                             'h2_ind_fg_amhcsfi_res')
                          else {'stage3', 'stage4', 'coarse_logits', 'fine_logits'})
         if set(predictions) != expected_keys or predictions['stage3'].shape != (batch, 45, 64, 64) or \
                 predictions['stage4'].shape != (batch, 45, 64, 64) or \
@@ -154,7 +160,7 @@ def check_fine_guidance_variants(batch):
             raise RuntimeError('{} violates the dual-head fine-guidance contract'.format(variant))
         fine_loss = coarse_heatmap_loss(predictions['fine_logits'], target, 1024, sigma=3.0)
         loss = two_head_loss(predictions, target) + fine_loss
-        if variant == 'h2_ind_csfi_bi':
+        if variant in bidir_variants:
             if predictions['coarse_logits'].shape != (batch, 1, 32, 32):
                 raise RuntimeError('A3-Bi has invalid coarse heatmap')
             loss = loss + 0.5 * coarse_heatmap_loss(predictions['coarse_logits'], target, 1024, sigma=1.5)
@@ -163,10 +169,88 @@ def check_fine_guidance_variants(batch):
         loss.backward()
         if not has_gradient(module.fine_guidance.fine_head.weight) or not has_gradient(module.fine_guidance.gamma):
             raise RuntimeError('{} fine-guidance branch has zero gradient'.format(variant))
-        if variant == 'h2_ind_csfi_bi' and not has_gradient(module.coarse_guidance.coarse_head.weight):
+        if variant in bidir_variants and not has_gradient(module.coarse_guidance.coarse_head.weight):
             raise RuntimeError('A3-Bi coarse-guidance branch has zero gradient')
         del model, predictions
         torch.cuda.empty_cache()
+
+
+def check_adaptive_csfi_variants(batch):
+    variants = (
+        'h2_ind_csfi_cg_channel', 'h2_ind_csfi_cg_dir', 'h2_ind_csfi_cg_ar')
+    query = torch.randn(batch, 3, 256, 256, device='cuda')
+    reference = torch.randn(batch, 3, 1024, 1024, device='cuda')
+    click = torch.rand(batch, 256, 256, device='cuda')
+    target = torch.tensor([[256, 256, 512, 512]], dtype=torch.float32, device='cuda').repeat(batch, 1)
+    for variant in variants:
+        model = torch.nn.DataParallel(TROGeoMSDetectionAblation(variant=variant)).cuda().train()
+        module = model.module
+        z3, z4 = (torch.randn(batch, 384, 64, 64, device='cuda'),
+                  torch.randn(batch, 768, 32, 32, device='cuda'))
+        with torch.no_grad():
+            out3, out4, diagnostics = module.adaptive_csfi_reliability(
+                z3, z4, module.cross_scale_interaction)
+        if not torch.equal(out3, z3) or not torch.equal(out4, z4):
+            raise RuntimeError('{} changes features at zero alpha'.format(variant))
+        if diagnostics['channel3_mean'].item() != 1.0 or diagnostics['channel4_mean'].item() != 1.0 or \
+                diagnostics['lambda43'].item() != 0.5 or diagnostics['lambda34'].item() != 0.5:
+            raise RuntimeError('{} does not have neutral reliability initialization'.format(variant))
+        optimizer = torch.optim.SGD(model.parameters(), lr=1e-4)
+        predictions, _ = model(query, reference, click)
+        if set(predictions) != {'stage3', 'stage4', 'coarse_logits'} or \
+                predictions['stage3'].shape != (batch, 45, 64, 64) or \
+                predictions['stage4'].shape != (batch, 45, 64, 64) or \
+                predictions['coarse_logits'].shape != (batch, 1, 32, 32):
+            raise RuntimeError('{} violates the A3 prediction contract'.format(variant))
+        loss = two_head_loss(predictions, target) + coarse_heatmap_loss(predictions['coarse_logits'], target, 1024)
+        if not torch.isfinite(loss):
+            raise RuntimeError('{} has a non-finite first loss'.format(variant))
+        loss.backward()
+        for parameter in (module.cross_scale_interaction.alpha3, module.cross_scale_interaction.alpha4,
+                          module.coarse_guidance.coarse_head.weight):
+            if not has_gradient(parameter):
+                raise RuntimeError('{} has zero first-step shared-module gradient'.format(variant))
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        predictions, _ = model(query, reference, click)
+        loss = two_head_loss(predictions, target) + coarse_heatmap_loss(predictions['coarse_logits'], target, 1024)
+        loss.backward()
+        if variant in module.ADAPTIVE_CSFI_CHANNEL_VARIANTS:
+            for layer in (module.adaptive_csfi_reliability.channel3[-1],
+                          module.adaptive_csfi_reliability.channel4[-1]):
+                if not has_gradient(layer.weight):
+                    raise RuntimeError('{} channel reliability has zero second-step gradient'.format(variant))
+        if variant in module.ADAPTIVE_CSFI_DIRECTION_VARIANTS and not has_gradient(
+                module.adaptive_csfi_reliability.direction_predictor[-1].weight):
+            raise RuntimeError('{} direction reliability has zero second-step gradient'.format(variant))
+        del model, predictions, z3, z4, out3, out4
+        torch.cuda.empty_cache()
+
+
+def check_cg_habr_prior(batch):
+    variant = 'h2_ind_cg_habr_prior'
+    model = torch.nn.DataParallel(TROGeoMSDetectionAblation(variant=variant)).cuda().train()
+    module = model.module
+    if not hasattr(module, 'coarse_guidance') or not hasattr(module, 'habr_former') or \
+            hasattr(module, 'cross_scale_interaction'):
+        raise RuntimeError('CG-HABR must contain coarse guidance and HABR, but no CSFI')
+    if module.habr_former.mode != 'prior' or not module.habr_former.use_prior or \
+            module.habr_former.rounds != 1 or module.coarse_guidance.gamma.item() != 0.0 or \
+            module.habr_former.block.alpha43.item() != 0.0 or module.habr_former.block.alpha34.item() != 0.0:
+        raise RuntimeError('CG-HABR does not preserve the required prior/zero-residual configuration')
+    query = torch.randn(batch, 3, 256, 256, device='cuda')
+    reference = torch.randn(batch, 3, 1024, 1024, device='cuda')
+    click = torch.rand(batch, 256, 256, device='cuda')
+    predictions, _ = model(query, reference, click)
+    expected = {'stage3', 'stage4', 'coarse_logits', 'habr_prior3_logits', 'habr_prior4_logits'}
+    if set(predictions) != expected or predictions['stage3'].shape != (batch, 45, 64, 64) or \
+            predictions['stage4'].shape != (batch, 45, 64, 64) or \
+            predictions['coarse_logits'].shape != (batch, 1, 32, 32) or \
+            predictions['habr_prior3_logits'].shape != (batch, 1, 64, 64) or \
+            predictions['habr_prior4_logits'].shape != (batch, 1, 32, 32):
+        raise RuntimeError('CG-HABR prediction contract mismatch')
+    del model, predictions
+    torch.cuda.empty_cache()
 
 
 def main():
@@ -181,6 +265,8 @@ def main():
     loss1, loss2, parameters = check_two_step_backward(args.batch_size)
     check_coarse_variants(args.batch_size)
     check_fine_guidance_variants(args.batch_size)
+    check_adaptive_csfi_variants(args.batch_size)
+    check_cg_habr_prior(args.batch_size)
     print('e4_csfi_sanity batch={} identity_max_abs={} loss1={:.6f} loss2={:.6f} '
           'params={} peak_mib={:.1f}'.format(
               args.batch_size, difference, loss1, loss2, parameters,

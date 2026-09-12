@@ -1,5 +1,7 @@
 """Losses for true multi-grid (E2) and two-head (E3/E4) detection ablations."""
 
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -78,3 +80,44 @@ def three_head_yolo_loss_stage2_cls_half(pred2, pred3, pred4, ori_gt_bboxes, anc
     loss_geo = (geo2 + geo3 + geo4) / 3.0
     loss_cls = (0.5 * cls2 + cls3 + cls4) / 2.5
     return loss_geo, loss_cls
+
+
+def rccd_consensus_loss(pred3, pred4, temperature=2.0, weight_temperature=0.2, eps=1e-8):
+    """Training-only reliability-aware consensus over two heads' confidence maps."""
+    if pred3.shape != pred4.shape:
+        raise ValueError('RCCD requires identical prediction shapes, got {} and {}'.format(
+            tuple(pred3.shape), tuple(pred4.shape)))
+    if pred3.ndim != 5 or pred3.shape[1:3] != (9, 5):
+        raise ValueError('RCCD expects [B,9,5,H,W], got {}'.format(tuple(pred3.shape)))
+    if temperature <= 0.0 or weight_temperature <= 0.0:
+        raise ValueError('RCCD temperatures must be positive')
+
+    batch_size = pred3.shape[0]
+    logits3 = pred3[:, :, 4].reshape(batch_size, -1)
+    logits4 = pred4[:, :, 4].reshape(batch_size, -1)
+    log_q3 = F.log_softmax(logits3 / temperature, dim=1)
+    log_q4 = F.log_softmax(logits4 / temperature, dim=1)
+    q3, q4 = log_q3.exp(), log_q4.exp()
+
+    # The teacher-selection path is explicitly stop-gradient: confidence cannot
+    # be sharpened merely to gain a larger teacher share.
+    with torch.no_grad():
+        prob3, prob4 = F.softmax(logits3, dim=1), F.softmax(logits4, dim=1)
+        entropy3 = -(prob3 * prob3.clamp_min(eps).log()).sum(dim=1)
+        entropy4 = -(prob4 * prob4.clamp_min(eps).log()).sum(dim=1)
+        normalizer = math.log(float(logits3.shape[1]))
+        reliability3, reliability4 = 1.0 - entropy3 / normalizer, 1.0 - entropy4 / normalizer
+        weights = F.softmax(torch.stack((reliability3, reliability4), dim=1) / weight_temperature, dim=1)
+        weight3, weight4 = weights[:, :1], weights[:, 1:]
+        teacher = (weight3 * q3 + weight4 * q4).clamp_min(eps)
+        teacher = teacher / teacher.sum(dim=1, keepdim=True)
+
+    loss3 = F.kl_div(log_q3, teacher, reduction='batchmean')
+    loss4 = F.kl_div(log_q4, teacher, reduction='batchmean')
+    loss = 0.5 * (temperature ** 2) * (loss3 + loss4)
+    diagnostics = {
+        'rccd_reliability3': reliability3.mean(), 'rccd_reliability4': reliability4.mean(),
+        'rccd_weight3': weight3.mean(), 'rccd_weight4': weight4.mean(),
+        'rccd_entropy3': entropy3.mean(), 'rccd_entropy4': entropy4.mean(),
+    }
+    return loss, diagnostics

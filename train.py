@@ -41,7 +41,8 @@ from model.TROGeo_ms_direct_ca_sh import TROGeoMSDirectCASH
 from model.TROGeo_ms_detection_ablation import TROGeoMSDetectionAblation
 from model.loss import yolo_loss, build_target, adjust_learning_rate
 from model.multiscale_detection_loss import (multigrid_yolo_loss, two_head_yolo_loss, three_head_yolo_loss,
-                                             three_head_yolo_loss_stage2_cls_half, coarse_heatmap_loss)
+                                             three_head_yolo_loss_stage2_cls_half, coarse_heatmap_loss,
+                                             rccd_consensus_loss)
 from utils.utils import AverageMeter, eval_iou_acc
 from utils.multiscale_detection import decode_multigrid_top1, decode_top1, select_two_heads, select_three_heads, eval_decoded_boxes
 from utils.checkpoint import save_checkpoint, load_pretrain
@@ -147,7 +148,12 @@ def main():
         'h2_ind_pe_all_key', 'h2_ind_le_stage2_res',
         'h2_ind_pgca_c_direct', 'h2_ind_pgca_a_conv', 'h2_ind_pgca_b_dynamic',
         'h2_ind_csfi', 'h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier',
-        'h2_ind_csfi_fg', 'h2_ind_csfi_bi',
+        'h2_ind_cg_habr_prior',
+        'h2_ind_csfi_fg', 'h2_ind_csfi_bi', 'h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi', 'h2_ind_amhcsfi_res_bi',
+        'h2_ind_cg_amhcsfi_res', 'h2_ind_fg_amhcsfi_res',
+        'h2_ind_fg_nocsfi', 'h2_ind_bi_nocsfi',
+        'h2_ind_csfi_cg_channel', 'h2_ind_csfi_cg_dir', 'h2_ind_csfi_cg_ar',
+        'h2_ind_pqra',
         'h2_ind_habr_core', 'h2_ind_habr_prior', 'h2_ind_habr_adapt', 'h2_ind_habr'),
                         default='none', help='controlled Swin-T multi-scale detection ablation')
     parser.add_argument('--coarse_loss_weight', default=0.2, type=float,
@@ -156,6 +162,13 @@ def main():
                         help='Gaussian sigma in cells for E4 Stage4 coarse heatmap supervision')
     parser.add_argument('--fine_sigma', default=3.0, type=float,
                         help='Gaussian sigma in Stage3 64x64 cells for fine-guidance supervision')
+    parser.add_argument('--rccd', action='store_true',
+                        help='training-only reliability-aware confidence consensus for h2_ind_csfi_bi')
+    parser.add_argument('--rccd_weight', default=0.1, type=float, help='maximum RCCD loss weight')
+    parser.add_argument('--rccd_temperature', default=2.0, type=float, help='RCCD distillation temperature')
+    parser.add_argument('--rccd_tau', default=0.2, type=float, help='RCCD reliability-weight temperature')
+    parser.add_argument('--rccd_warmup_epochs', default=3, type=int, help='initial zero-weight RCCD epochs')
+    parser.add_argument('--rccd_ramp_epochs', default=3, type=int, help='RCCD ramp epochs before full weight')
     parser.add_argument('--h3_iou_threshold', default=0.5, type=float,
                         help='H3: fuse two Top-1 boxes only when their pair IoU reaches this threshold')
     parser.add_argument('--trogeo_backbone', choices=('swin_s', 'swin_t', 'resnet50', 'vit_t', 'vit_s'), default='swin_s',
@@ -177,6 +190,11 @@ def main():
     args = parser.parse_args()
     if args.pretrain and args.resume:
         parser.error('--pretrain and --resume are mutually exclusive')
+    if args.rccd and args.trogeo_ms_det_variant != 'h2_ind_csfi_bi':
+        parser.error('--rccd is restricted to --trogeo_ms_det_variant h2_ind_csfi_bi')
+    if args.rccd_weight < 0.0 or args.rccd_temperature <= 0.0 or args.rccd_tau <= 0.0 or \
+            args.rccd_warmup_epochs < 0 or args.rccd_ramp_epochs < 0:
+        parser.error('RCCD requires nonnegative weight/epochs and positive temperatures')
     if args.loader_seed is None:
         args.loader_seed = args.seed
     if args.runtime_seed is None:
@@ -477,6 +495,13 @@ def main():
         message = '=> resumed checkpoint {} at epoch {}, retained best Accu {:.6f}'.format(args.resume, start_epoch, best_accu)
         print(message)
         logging.info(message)
+    if args.rccd and not (args.test or args.val):
+        message = ('[RCCD config] enabled=True variant=h2_ind_csfi_bi temperature={} tau={} max_weight={} '
+                   'warmup_epochs={} ramp_epochs={} bbox_distillation=False inference_rccd=False').format(
+                       args.rccd_temperature, args.rccd_tau, args.rccd_weight,
+                       args.rccd_warmup_epochs, args.rccd_ramp_epochs)
+        print(message, flush=True)
+        logging.info(message)
     
     if args.test:
         _ = test_epoch(test_loader, model, args)
@@ -530,10 +555,22 @@ def is_ms_detection_variant(args):
     return args.trogeo_ms_det_variant != 'none'
 
 
+def get_rccd_weight(epoch, args):
+    """Zero-based warm-up and linear ramp for the training-only RCCD term."""
+    if not args.rccd or epoch < args.rccd_warmup_epochs:
+        return 0.0
+    if args.rccd_ramp_epochs == 0 or epoch >= args.rccd_warmup_epochs + args.rccd_ramp_epochs:
+        return args.rccd_weight
+    progress = (epoch - args.rccd_warmup_epochs + 1) / float(args.rccd_ramp_epochs + 1)
+    return args.rccd_weight * progress
+
+
 def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, include_loss=True):
     """Return decoded final boxes and, during training, the matching loss terms."""
     variant = args.trogeo_ms_det_variant
-    coarse_variants = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier')
+    coarse_variants = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier',
+                       'h2_ind_csfi_cg_channel', 'h2_ind_csfi_cg_dir', 'h2_ind_csfi_cg_ar',
+                       'h2_ind_cg_habr_prior')
     habr_prior_variants = ('h2_ind_habr_prior', 'h2_ind_habr_adapt', 'h2_ind_habr')
     loss_aux = None
     three_scale_variants = (
@@ -594,10 +631,11 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
                 loss_prior4 = coarse_heatmap_loss(predictions['habr_prior4_logits'], ori_gt_bbox,
                                                    args.img_size, args.coarse_sigma)
                 loss_aux = 0.5 * (loss_prior3 + loss_prior4)
-            elif variant == 'h2_ind_csfi_fg':
+            elif variant in ('h2_ind_csfi_fg', 'h2_ind_fg_nocsfi'):
                 loss_aux = coarse_heatmap_loss(predictions['fine_logits'], ori_gt_bbox,
                                                args.img_size, args.fine_sigma)
-            elif variant == 'h2_ind_csfi_bi':
+            elif variant in ('h2_ind_csfi_bi', 'h2_ind_bi_nocsfi', 'h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi',
+                             'h2_ind_amhcsfi_res_bi', 'h2_ind_cg_amhcsfi_res', 'h2_ind_fg_amhcsfi_res'):
                 loss_coarse = coarse_heatmap_loss(predictions['coarse_logits'], ori_gt_bbox,
                                                   args.img_size, args.coarse_sigma)
                 loss_fine = coarse_heatmap_loss(predictions['fine_logits'], ori_gt_bbox,
@@ -621,6 +659,11 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
     avg_losses = AverageMeter()
     avg_cls_losses = AverageMeter()
     avg_geo_losses = AverageMeter()
+    avg_rccd_losses = AverageMeter()
+    avg_rccd_weight3 = AverageMeter()
+    avg_rccd_weight4 = AverageMeter()
+    avg_rccd_rel3 = AverageMeter()
+    avg_rccd_rel4 = AverageMeter()
     avg_accu = AverageMeter()
     avg_accu_center = AverageMeter()
     avg_iou = AverageMeter()
@@ -661,10 +704,21 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
         ori_gt_bbox = torch.clamp(ori_gt_bbox, min=0, max=args.img_size-1)
 
         prediction_output, _ = forward_model(model, query_imgs, rs_imgs, mat_clickxy, prompt_maps)
+        loss_rccd = None
+        rccd_diagnostics = None
+        current_rccd_weight = 0.0
         if is_ms_detection_variant(args):
             loss_geo, loss_cls, loss_aux, final_box, _ = _ms_predictions_and_loss(
                 prediction_output, ori_gt_bbox, anchors_full, args, include_loss=True)
             accu, _, iou, accu_center = eval_decoded_boxes(final_box, ori_gt_bbox, args.img_size)
+            if args.rccd:
+                current_rccd_weight = get_rccd_weight(epoch, args)
+                if current_rccd_weight > 0.0:
+                    p3_rccd = prediction_output['stage3'].view(prediction_output['stage3'].shape[0], 9, 5, 64, 64)
+                    p4_rccd = prediction_output['stage4'].view(prediction_output['stage4'].shape[0], 9, 5, 64, 64)
+                    loss_rccd, rccd_diagnostics = rccd_consensus_loss(
+                        p3_rccd, p4_rccd, temperature=args.rccd_temperature,
+                        weight_temperature=args.rccd_tau)
         else:
             pred_anchor = prediction_output.view(prediction_output.shape[0], 9, 5,
                                                  prediction_output.shape[2], prediction_output.shape[3])
@@ -676,6 +730,8 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
         loss = loss_cls + loss_geo * args.beta
         if loss_aux is not None:
             loss = loss + args.coarse_loss_weight * loss_aux
+        if loss_rccd is not None:
+            loss = loss + current_rccd_weight * loss_rccd
 
         optimizer.zero_grad()
         loss.backward()
@@ -684,6 +740,12 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
         avg_losses.update(loss.item(), query_imgs.shape[0])
         avg_geo_losses.update(loss_geo.item(), query_imgs.shape[0])
         avg_cls_losses.update(loss_cls.item(), query_imgs.shape[0])
+        if loss_rccd is not None:
+            avg_rccd_losses.update(loss_rccd.item(), query_imgs.shape[0])
+            avg_rccd_weight3.update(rccd_diagnostics['rccd_weight3'].item(), query_imgs.shape[0])
+            avg_rccd_weight4.update(rccd_diagnostics['rccd_weight4'].item(), query_imgs.shape[0])
+            avg_rccd_rel3.update(rccd_diagnostics['rccd_reliability3'].item(), query_imgs.shape[0])
+            avg_rccd_rel4.update(rccd_diagnostics['rccd_reliability4'].item(), query_imgs.shape[0])
         
         ## metrics
         avg_iou.update(iou, query_imgs.shape[0])
@@ -706,6 +768,12 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
                 .format( \
                     epoch, batch_idx, len(train_loader), batch_time=batch_time, \
                     loss=avg_losses, geo=avg_geo_losses, cls=avg_cls_losses, accu=avg_accu, miou=avg_iou, accu_c=avg_accu_center)
+            if args.rccd:
+                print_str += ('RCCD {rccd:.6f}\tRCCD_lambda {lam:.4f}\tRCCD_w3 {w3:.4f}\t'
+                              'RCCD_w4 {w4:.4f}\tRCCD_r3 {r3:.4f}\tRCCD_r4 {r4:.4f}\t').format(
+                                  rccd=avg_rccd_losses.avg, lam=current_rccd_weight,
+                                  w3=avg_rccd_weight3.avg, w4=avg_rccd_weight4.avg,
+                                  r3=avg_rccd_rel3.avg, r4=avg_rccd_rel4.avg)
             print(print_str)
             logging.info(print_str)
 

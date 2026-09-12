@@ -8,13 +8,31 @@ import torchvision.models as models
 from .TROGeo_ms_direct_ca_sh import SwinTMultiStageEncoder
 from .TROGeo_wo_ost import double_conv
 from .detgeo_position_embedding import DetGeoPositionEmbedding
-from .trogeo_attention import SpatialTransformer
+from .trogeo_attention import CrossAttention, SpatialTransformer
 from .vit_multistage import TiledViTMultiStageEncoder
 from .habr_former import HABRFormer
 
 
 def _make_pe_mlp(out_dim):
     return nn.Sequential(nn.Linear(1, 128), nn.GELU(), nn.Linear(128, out_dim))
+
+
+class PositionQueryRefinement(nn.Module):
+    """Position-conditioned residual Query refinement before Direct-CA."""
+
+    def __init__(self, dim, heads, dim_head=64):
+        super().__init__()
+        self.attn = CrossAttention(query_dim=dim, context_dim=dim, heads=heads, dim_head=dim_head)
+        self.alpha = nn.Parameter(torch.tensor(0.0))
+
+    def forward(self, query_tokens, position_tokens):
+        if query_tokens.shape != position_tokens.shape:
+            raise RuntimeError('PQRA requires equal Query/Position shapes, got {} and {}'.format(
+                tuple(query_tokens.shape), tuple(position_tokens.shape)))
+        delta = self.attn(query_tokens, context=query_tokens,
+                          context_key=query_tokens + position_tokens,
+                          context_value=query_tokens)
+        return query_tokens + torch.tanh(self.alpha) * delta, delta
 
 
 def _make_le_block():
@@ -65,14 +83,181 @@ class CrossScaleFeatureInteraction(nn.Module):
         self.alpha4 = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, z3, z4):
-        z4_to3 = F.interpolate(self.proj_4to3(z4), size=z3.shape[-2:],
-                                mode='bilinear', align_corners=False)
-        z3_to4 = self.proj_3to4(z3)
-        gate3 = self.gate3(torch.cat((z3, z4_to3), dim=1))
-        gate4 = self.gate4(torch.cat((z4, z3_to4), dim=1))
+        z4_to3, z3_to4, _, _, gate3, gate4 = self.components(z3, z4)
         z3_out = z3 + torch.tanh(self.alpha3) * gate3 * z4_to3
         z4_out = z4 + torch.tanh(self.alpha4) * gate4 * z3_to4
         return z3_out, z4_out, gate3, gate4
+
+    def components(self, z3, z4):
+        """Return the original CSFI maps and spatial gates without updating features."""
+        z4_to3 = F.interpolate(self.proj_4to3(z4), size=z3.shape[-2:],
+                                mode='bilinear', align_corners=False)
+        z3_to4 = self.proj_3to4(z3)
+        fused3 = torch.cat((z3, z4_to3), dim=1)
+        fused4 = torch.cat((z4, z3_to4), dim=1)
+        return z4_to3, z3_to4, fused3, fused4, self.gate3(fused3), self.gate4(fused4)
+
+
+class MultiHeadSpatialRelationMask(nn.Module):
+    """Three-receptive-field spatial mask for a paired cross-scale feature."""
+
+    def __init__(self, in_channels, relation_dim=64, adaptive=False):
+        super().__init__()
+        self.adaptive = adaptive
+        self.relation_encoder = nn.Sequential(
+            nn.Conv2d(in_channels, relation_dim, kernel_size=1, bias=False),
+            nn.GroupNorm(8, relation_dim),
+            nn.GELU(),
+        )
+        self.head1 = self._make_head(relation_dim, 1)
+        self.head3 = self._make_head(relation_dim, 3)
+        self.head5 = self._make_head(relation_dim, 5)
+        if adaptive:
+            hidden_dim = max(relation_dim // 2, 16)
+            self.scale_selector = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(relation_dim, hidden_dim), nn.GELU(),
+                nn.Linear(hidden_dim, 3),
+            )
+            nn.init.zeros_(self.scale_selector[-1].weight)
+            nn.init.zeros_(self.scale_selector[-1].bias)
+
+    @staticmethod
+    def _make_head(channels, kernel_size):
+        # A valid Conv followed by the same-size transposed Conv restores HxW exactly.
+        return nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=kernel_size, padding=0, bias=False),
+            nn.GELU(),
+            nn.ConvTranspose2d(channels, 1, kernel_size=kernel_size, padding=0, bias=True),
+        )
+
+    def forward(self, pair_feature):
+        relation = self.relation_encoder(pair_feature)
+        heads = torch.stack((self.head1(relation), self.head3(relation), self.head5(relation)), dim=1)
+        batch_size = relation.shape[0]
+        if self.adaptive:
+            weights = torch.softmax(self.scale_selector(relation), dim=1)
+        else:
+            weights = relation.new_full((batch_size, 3), 1.0 / 3.0)
+        # 3 * weighted mean gives the equal-sum formulation at uniform weights.
+        logits = torch.sum(heads * (3.0 * weights.view(batch_size, 3, 1, 1, 1)), dim=1)
+        return torch.sigmoid(logits), weights
+
+
+class MultiHeadCrossScaleFeatureInteraction(CrossScaleFeatureInteraction):
+    """CSFI with MHSAM-inspired 1/3/5 relation masks inside each residual."""
+
+    def __init__(self, adaptive=False):
+        super().__init__()
+        self.adaptive = adaptive
+        self.relation_mask3 = MultiHeadSpatialRelationMask(768, relation_dim=64, adaptive=adaptive)
+        self.relation_mask4 = MultiHeadSpatialRelationMask(1536, relation_dim=64, adaptive=adaptive)
+
+    def forward(self, z3, z4):
+        z4_to3, z3_to4, pair3, pair4, gate3, gate4 = self.components(z3, z4)
+        mask3, weights3 = self.relation_mask3(pair3)
+        mask4, weights4 = self.relation_mask4(pair4)
+        z3_out = z3 + torch.tanh(self.alpha3) * gate3 * mask3 * z4_to3
+        z4_out = z4 + torch.tanh(self.alpha4) * gate4 * mask4 * z3_to4
+        return z3_out, z4_out, {'gate3': gate3, 'gate4': gate4, 'mask3': mask3, 'mask4': mask4,
+                                'weights3': weights3, 'weights4': weights4}
+
+
+class AdaptiveMultiReceptiveMask(nn.Module):
+    """Sample-adaptive 1/3/5-receptive-field residual gate refinement."""
+
+    def __init__(self, in_channels, relation_dim=64):
+        super().__init__()
+        self.relation_encoder = nn.Sequential(
+            nn.Conv2d(in_channels, relation_dim, kernel_size=1, bias=False),
+            nn.GroupNorm(8, relation_dim), nn.GELU())
+        self.head1 = MultiHeadSpatialRelationMask._make_head(relation_dim, 1)
+        self.head3 = MultiHeadSpatialRelationMask._make_head(relation_dim, 3)
+        self.head5 = MultiHeadSpatialRelationMask._make_head(relation_dim, 5)
+        self.scale_selector = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(relation_dim, 32), nn.GELU(), nn.Linear(32, 3))
+        nn.init.zeros_(self.scale_selector[-1].weight)
+        nn.init.zeros_(self.scale_selector[-1].bias)
+
+    def forward(self, pair_feature):
+        relation = self.relation_encoder(pair_feature)
+        heads = torch.stack((self.head1(relation), self.head3(relation), self.head5(relation)), dim=1)
+        weights = torch.softmax(self.scale_selector(relation), dim=1)
+        logits = (heads * (3.0 * weights[:, :, None, None, None])).sum(dim=1)
+        return torch.sigmoid(logits), weights
+
+
+class ResidualAdaptiveMultiReceptiveCSFI(nn.Module):
+    """Refine original CSFI gates without duplicating original CSFI parameters."""
+
+    def __init__(self):
+        super().__init__()
+        self.mask3 = AdaptiveMultiReceptiveMask(768, relation_dim=64)
+        self.mask4 = AdaptiveMultiReceptiveMask(1536, relation_dim=64)
+        self.refine_beta3 = nn.Parameter(torch.tensor(0.0))
+        self.refine_beta4 = nn.Parameter(torch.tensor(0.0))
+
+    def forward(self, z3, z4, csfi):
+        z4_to3, z3_to4, pair3, pair4, gate3, gate4 = csfi.components(z3, z4)
+        mask3, weights3 = self.mask3(pair3)
+        mask4, weights4 = self.mask4(pair4)
+        modulation3 = 1.0 + torch.tanh(self.refine_beta3) * (2.0 * mask3 - 1.0)
+        modulation4 = 1.0 + torch.tanh(self.refine_beta4) * (2.0 * mask4 - 1.0)
+        z3_out = z3 + torch.tanh(csfi.alpha3) * gate3 * modulation3 * z4_to3
+        z4_out = z4 + torch.tanh(csfi.alpha4) * gate4 * modulation4 * z3_to4
+        return z3_out, z4_out, {'gate3': gate3, 'gate4': gate4, 'mask3': mask3, 'mask4': mask4,
+                                'modulation3': modulation3, 'modulation4': modulation4,
+                                'weights3': weights3, 'weights4': weights4}
+
+
+class AdaptiveCSFIReliability(nn.Module):
+    """Optional channel and sample-adaptive directional reliability for CSFI."""
+
+    def __init__(self, use_channel_gate=False, use_direction_weight=False):
+        super().__init__()
+        self.use_channel_gate = use_channel_gate
+        self.use_direction_weight = use_direction_weight
+        if use_channel_gate:
+            self.channel3 = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Conv2d(768, 96, 1), nn.GELU(),
+                                          nn.Conv2d(96, 384, 1))
+            self.channel4 = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Conv2d(1536, 192, 1), nn.GELU(),
+                                          nn.Conv2d(192, 768, 1))
+            nn.init.zeros_(self.channel3[-1].weight)
+            nn.init.zeros_(self.channel3[-1].bias)
+            nn.init.zeros_(self.channel4[-1].weight)
+            nn.init.zeros_(self.channel4[-1].bias)
+        if use_direction_weight:
+            self.dir_proj3 = nn.Sequential(nn.Linear(384, 128), nn.GELU())
+            self.dir_proj4 = nn.Sequential(nn.Linear(768, 128), nn.GELU())
+            self.direction_predictor = nn.Sequential(nn.Linear(256, 64), nn.GELU(), nn.Linear(64, 2))
+            nn.init.zeros_(self.direction_predictor[-1].weight)
+            nn.init.zeros_(self.direction_predictor[-1].bias)
+
+    def forward(self, z3, z4, base_csfi):
+        z4_to3, z3_to4, fused3, fused4, spatial3, spatial4 = base_csfi.components(z3, z4)
+        if self.use_channel_gate:
+            channel3 = 2.0 * torch.sigmoid(self.channel3(fused3))
+            channel4 = 2.0 * torch.sigmoid(self.channel4(fused4))
+        else:
+            channel3 = channel4 = 1.0
+        batch = z3.shape[0]
+        if self.use_direction_weight:
+            v3 = self.dir_proj3(z3.mean(dim=(2, 3)))
+            v4 = self.dir_proj4(z4.mean(dim=(2, 3)))
+            direction = torch.softmax(self.direction_predictor(torch.cat((v3, v4), dim=1)), dim=1)
+            lambda43, lambda34 = direction[:, 0].view(batch, 1, 1, 1), direction[:, 1].view(batch, 1, 1, 1)
+        else:
+            lambda43 = z3.new_full((batch, 1, 1, 1), 0.5)
+            lambda34 = z3.new_full((batch, 1, 1, 1), 0.5)
+        gate3, gate4 = spatial3 * channel3, spatial4 * channel4
+        z3_out = z3 + 2.0 * lambda43 * torch.tanh(base_csfi.alpha3) * gate3 * z4_to3
+        z4_out = z4 + 2.0 * lambda34 * torch.tanh(base_csfi.alpha4) * gate4 * z3_to4
+        diagnostics = {
+            'spatial3_mean': spatial3.mean(), 'spatial4_mean': spatial4.mean(),
+            'channel3_mean': channel3.mean() if torch.is_tensor(channel3) else z3.new_tensor(1.0),
+            'channel4_mean': channel4.mean() if torch.is_tensor(channel4) else z3.new_tensor(1.0),
+            'lambda43': lambda43.mean(), 'lambda34': lambda34.mean(),
+        }
+        return z3_out, z4_out, diagnostics
 
 
 class CoarseGuidance(nn.Module):
@@ -164,26 +349,44 @@ class TROGeoMSDetectionAblation(nn.Module):
         'h2_ind_pgca_a_conv',
         'h2_ind_pgca_b_dynamic',
     )
+    QUERY_REFINE_VARIANTS = ('h2_ind_pqra',)
     # Strict E4 two-scale post-matching interaction.  This must remain
     # separate from all PE/LE and PGCA variants so that h2_ind is untouched.
     TWO_SCALE_COLLAB_VARIANTS = (
         'h2_ind_csfi', 'h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier',
         'h2_ind_csfi_fg', 'h2_ind_csfi_bi')
+    ADAPTIVE_CSFI_VARIANTS = ('h2_ind_csfi_cg_channel', 'h2_ind_csfi_cg_dir', 'h2_ind_csfi_cg_ar')
+    MHCSFI_VARIANTS = ('h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi')
+    AMHCSFI_RES_BI_VARIANTS = ('h2_ind_amhcsfi_res_bi',)
+    AMHCSFI_RES_GUIDE_VARIANTS = ('h2_ind_cg_amhcsfi_res', 'h2_ind_fg_amhcsfi_res')
+    AMHCSFI_RES_VARIANTS = AMHCSFI_RES_BI_VARIANTS + AMHCSFI_RES_GUIDE_VARIANTS
+    ADAPTIVE_CSFI_CHANNEL_VARIANTS = ('h2_ind_csfi_cg_channel', 'h2_ind_csfi_cg_ar')
+    ADAPTIVE_CSFI_DIRECTION_VARIANTS = ('h2_ind_csfi_cg_dir', 'h2_ind_csfi_cg_ar')
+    NO_CSFI_GUIDE_VARIANTS = ('h2_ind_fg_nocsfi', 'h2_ind_bi_nocsfi')
+    CG_HABR_PRIOR_VARIANTS = ('h2_ind_cg_habr_prior',)
+    TWO_SCALE_COLLAB_VARIANTS = (TWO_SCALE_COLLAB_VARIANTS + ADAPTIVE_CSFI_VARIANTS + MHCSFI_VARIANTS + AMHCSFI_RES_VARIANTS +
+                                 NO_CSFI_GUIDE_VARIANTS + CG_HABR_PRIOR_VARIANTS)
     CSFI_VARIANTS = (
         'h2_ind_csfi', 'h2_ind_csfi_cg', 'h2_ind_hier',
-        'h2_ind_csfi_fg', 'h2_ind_csfi_bi')
-    COARSE_GUIDE_VARIANTS = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier', 'h2_ind_csfi_bi')
-    FINE_GUIDE_VARIANTS = ('h2_ind_csfi_fg', 'h2_ind_csfi_bi')
-    BIDIR_GUIDE_VARIANTS = ('h2_ind_csfi_bi',)
-    HABR_VARIANTS = ('h2_ind_habr_core', 'h2_ind_habr_prior', 'h2_ind_habr_adapt', 'h2_ind_habr')
+        'h2_ind_csfi_fg', 'h2_ind_csfi_bi') + AMHCSFI_RES_BI_VARIANTS
+    COARSE_GUIDE_VARIANTS = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier', 'h2_ind_csfi_bi',
+                             'h2_ind_bi_nocsfi', 'h2_ind_cg_amhcsfi_res') + MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS + CG_HABR_PRIOR_VARIANTS + \
+                            ADAPTIVE_CSFI_VARIANTS
+    FINE_GUIDE_VARIANTS = ('h2_ind_csfi_fg', 'h2_ind_csfi_bi', 'h2_ind_fg_nocsfi', 'h2_ind_bi_nocsfi',
+                           'h2_ind_fg_amhcsfi_res') + MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS
+    FINE_ONLY_GUIDE_VARIANTS = ('h2_ind_csfi_fg', 'h2_ind_fg_nocsfi', 'h2_ind_fg_amhcsfi_res')
+    BIDIR_GUIDE_VARIANTS = ('h2_ind_csfi_bi', 'h2_ind_bi_nocsfi') + MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS
+    HABR_VARIANTS = ('h2_ind_habr_core', 'h2_ind_habr_prior', 'h2_ind_habr_adapt', 'h2_ind_habr') + \
+                    CG_HABR_PRIOR_VARIANTS
     HABR_MODE = {
         'h2_ind_habr_core': 'core', 'h2_ind_habr_prior': 'prior',
-        'h2_ind_habr_adapt': 'adapt', 'h2_ind_habr': 'full'}
+        'h2_ind_habr_adapt': 'adapt', 'h2_ind_habr': 'full',
+        'h2_ind_cg_habr_prior': 'prior'}
     HIER_VARIANTS = ('h2_ind_hier',)
     THREE_SCALE_VARIANTS = ('h2_ind_3scale', 'h2_ind_3scale_stage2cls05') + QUERY_PE_VARIANTS
     VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive') + \
                      THREE_SCALE_VARIANTS + TWO_SCALE_QUERY_PE_VARIANTS + TWO_SCALE_PGCA_VARIANTS + \
-                     TWO_SCALE_COLLAB_VARIANTS + HABR_VARIANTS
+                     TWO_SCALE_COLLAB_VARIANTS + HABR_VARIANTS + QUERY_REFINE_VARIANTS
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current'):
         super().__init__()
@@ -298,19 +501,47 @@ class TROGeoMSDetectionAblation(nn.Module):
                 self.lambda3 = nn.Parameter(torch.tensor(0.05))
                 self.lambda4 = nn.Parameter(torch.tensor(0.05))
 
-        if self.variant in self.CSFI_VARIANTS:
+        if self.variant in self.CSFI_VARIANTS or self.variant in self.ADAPTIVE_CSFI_VARIANTS:
             # Keep --standard_rng's ordinary trajectory: the added module
             # naturally consumes RNG during its own initialization.
             self.cross_scale_interaction = CrossScaleFeatureInteraction()
+        if self.variant in self.MHCSFI_VARIANTS:
+            self.mh_cross_scale_interaction = MultiHeadCrossScaleFeatureInteraction(
+                adaptive=self.variant == 'h2_ind_amhcsfi_bi')
+        if self.variant in self.NO_CSFI_GUIDE_VARIANTS:
+            # Match the surviving guidance modules' normal --standard_rng
+            # initialization position to FG/Bi, without registering or using CSFI.
+            _rng_pad_csfi = CrossScaleFeatureInteraction()
+            del _rng_pad_csfi
         if self.variant in self.COARSE_GUIDE_VARIANTS:
             self.coarse_guidance = CoarseGuidance()
         if self.variant in self.FINE_GUIDE_VARIANTS:
             self.fine_guidance = FineGuidance()
+        # These one-way variants must keep their original Guidance parameters
+        # at the same --standard_rng position as their no-CSFI baselines.
+        if self.variant in self.AMHCSFI_RES_GUIDE_VARIANTS:
+            self.cross_scale_interaction = CrossScaleFeatureInteraction()
+        # Must be after all A3-Bi public modules under --standard_rng.
+        if self.variant in self.AMHCSFI_RES_VARIANTS:
+            self.amhcsfi_res_refiner = ResidualAdaptiveMultiReceptiveCSFI()
         if self.variant in self.HABR_VARIANTS:
             self.habr_former = HABRFormer(mode=self.HABR_MODE[self.variant], relation_dim=256,
                                           num_samples=4, num_heads=4, window_size=4, offset_scale=2.0)
+        # Intentionally last: shared CSFI and coarse-guidance initialization
+        # keep the same ordinary --standard_rng trajectory as A3.
+        if self.variant in self.ADAPTIVE_CSFI_VARIANTS:
+            self.adaptive_csfi_reliability = AdaptiveCSFIReliability(
+                use_channel_gate=self.variant in self.ADAPTIVE_CSFI_CHANNEL_VARIANTS,
+                use_direction_weight=self.variant in self.ADAPTIVE_CSFI_DIRECTION_VARIANTS)
         if self.variant in self.HIER_VARIANTS:
             self.hier_conf_alpha = nn.Parameter(torch.tensor(0.0))
+        # Created after every A0 shared module so --standard_rng leaves their
+        # initialization trajectory intact; PQRA alone consumes the new RNG.
+        if self.variant in self.QUERY_REFINE_VARIANTS:
+            self.pqra_pos_proj3 = _make_pe_mlp(384)
+            self.pqra_pos_proj4 = _make_pe_mlp(768)
+            self.query_refine3 = PositionQueryRefinement(dim=384, heads=6, dim_head=64)
+            self.query_refine4 = PositionQueryRefinement(dim=768, heads=12, dim_head=64)
 
     @staticmethod
     def _expect(name, tensor, channels, height, width):
@@ -432,6 +663,8 @@ class TROGeoMSDetectionAblation(nn.Module):
         coarse_logits = coarse_up = None
         fine_logits = fine_down = None
         habr_prior3_logits = habr_prior4_logits = habr_diagnostics = None
+        adaptive_csfi_diagnostics = mhcsfi_diagnostics = None
+        pqra_delta3 = pqra_delta4 = pqra_position3 = pqra_position4 = None
         if self.three_scale:
             q2, q3, q4 = self.encoder(query_input)
             r2, r3, r4 = self.encoder(reference_imgs)
@@ -459,7 +692,7 @@ class TROGeoMSDetectionAblation(nn.Module):
             z3 = self.cvopm_stage3(r3_guided, context=self._to_tokens(q3))
             r4_guided, fine_logits, fine_down = self.fine_guidance(z3, r4)
             z4 = self.cvopm_stage4(r4_guided, context=self._to_tokens(q4))
-        elif self.variant == 'h2_ind_csfi_fg':
+        elif self.variant in self.FINE_ONLY_GUIDE_VARIANTS:
             z3 = self.cvopm_stage3(r3, context=self._to_tokens(q3))
             r4_guided, fine_logits, fine_down = self.fine_guidance(z3, r4)
             z4 = self.cvopm_stage4(r4_guided, context=self._to_tokens(q4))
@@ -488,12 +721,28 @@ class TROGeoMSDetectionAblation(nn.Module):
                                    position_bias=bias3, position_lambda=lambda3)
             z4 = self.cvopm_stage4(r4, context=self._to_tokens(q4),
                                    position_bias=bias4, position_lambda=lambda4)
+        elif self.variant in self.QUERY_REFINE_VARIANTS:
+            q3_tokens, q4_tokens = self._to_tokens(q3), self._to_tokens(q4)
+            pqra_position3 = self.pqra_pos_proj3(self._to_tokens(self._resize_position(click_map, q3)))
+            pqra_position4 = self.pqra_pos_proj4(self._to_tokens(self._resize_position(click_map, q4)))
+            q3_refined, pqra_delta3 = self.query_refine3(q3_tokens, pqra_position3)
+            q4_refined, pqra_delta4 = self.query_refine4(q4_tokens, pqra_position4)
+            z3 = self.cvopm_stage3(r3, context=q3_refined)
+            z4 = self.cvopm_stage4(r4, context=q4_refined)
         else:
             z3 = self.cvopm_stage3(r3, context=self._to_tokens(q3))
             z4 = self.cvopm_stage4(r4, context=self._to_tokens(q4))
 
         if self.variant in self.HABR_VARIANTS:
             z3, z4, habr_prior3_logits, habr_prior4_logits, habr_diagnostics = self.habr_former(z3, z4)
+        elif self.variant in self.ADAPTIVE_CSFI_VARIANTS:
+            z3, z4, adaptive_csfi_diagnostics = self.adaptive_csfi_reliability(
+                z3, z4, self.cross_scale_interaction)
+        elif self.variant in self.MHCSFI_VARIANTS:
+            z3, z4, mhcsfi_diagnostics = self.mh_cross_scale_interaction(z3, z4)
+        elif self.variant in self.AMHCSFI_RES_VARIANTS:
+            z3, z4, amhcsfi_res_diagnostics = self.amhcsfi_res_refiner(z3, z4, self.cross_scale_interaction)
+            csfi_gate3, csfi_gate4 = amhcsfi_res_diagnostics['gate3'], amhcsfi_res_diagnostics['gate4']
         elif self.variant in self.CSFI_VARIANTS:
             z3, z4, csfi_gate3, csfi_gate4 = self.cross_scale_interaction(z3, z4)
 
@@ -560,13 +809,45 @@ class TROGeoMSDetectionAblation(nn.Module):
                       'feature_fusion={} position_injection={} position_encoder={}'.format(
                       self.variant, tuple(q3.shape), tuple(q4.shape),
                       tuple(r3.shape), tuple(r4.shape), tuple(z3.shape), tuple(z4.shape), shapes,
-                      self.variant in self.CSFI_VARIANTS, self._position_mode(), self.position_mode), flush=True)
+                       self.variant in self.CSFI_VARIANTS or self.variant in self.ADAPTIVE_CSFI_VARIANTS or self.variant in self.MHCSFI_VARIANTS,
+                       self._position_mode(), self.position_mode), flush=True)
                 if self.variant in self.CSFI_VARIANTS:
                     print('[E4-CSFI sanity] gate3_mean={:.6f} gate4_mean={:.6f} '
                           'alpha3={:.6f} alpha4={:.6f}'.format(
                               csfi_gate3.mean().item(), csfi_gate4.mean().item(),
                               self.cross_scale_interaction.alpha3.item(),
+                               self.cross_scale_interaction.alpha4.item()), flush=True)
+                if self.variant in self.ADAPTIVE_CSFI_VARIANTS:
+                    d = adaptive_csfi_diagnostics
+                    print('[A3-AR-CSFI sanity] channel={} direction={} spatial3={:.6f} spatial4={:.6f} '
+                          'channel3={:.6f} channel4={:.6f} lambda43={:.6f} lambda34={:.6f} '
+                          'alpha3={:.6f} alpha4={:.6f}'.format(
+                              self.variant in self.ADAPTIVE_CSFI_CHANNEL_VARIANTS,
+                              self.variant in self.ADAPTIVE_CSFI_DIRECTION_VARIANTS,
+                              d['spatial3_mean'].item(), d['spatial4_mean'].item(),
+                              d['channel3_mean'].item(), d['channel4_mean'].item(),
+                              d['lambda43'].item(), d['lambda34'].item(),
+                              self.cross_scale_interaction.alpha3.item(),
                               self.cross_scale_interaction.alpha4.item()), flush=True)
+                if self.variant in self.MHCSFI_VARIANTS:
+                    d = mhcsfi_diagnostics
+                    w3, w4 = d['weights3'].mean(0), d['weights4'].mean(0)
+                    print('[E4-MHCSFI sanity] adaptive={} gate3_mean={:.6f} gate4_mean={:.6f} '
+                          'mask3_mean={:.6f} mask4_mean={:.6f} alpha3={:.6f} alpha4={:.6f} '
+                          'w3=[{:.4f},{:.4f},{:.4f}] w4=[{:.4f},{:.4f},{:.4f}]'.format(
+                              self.variant == 'h2_ind_amhcsfi_bi', d['gate3'].mean().item(), d['gate4'].mean().item(),
+                              d['mask3'].mean().item(), d['mask4'].mean().item(),
+                              self.mh_cross_scale_interaction.alpha3.item(), self.mh_cross_scale_interaction.alpha4.item(),
+                              w3[0].item(), w3[1].item(), w3[2].item(), w4[0].item(), w4[1].item(), w4[2].item()), flush=True)
+                if self.variant in self.AMHCSFI_RES_VARIANTS:
+                    d = amhcsfi_res_diagnostics
+                    w3, w4 = d['weights3'].mean(0), d['weights4'].mean(0)
+                    print('[E4-AMHCSFI-RES sanity] alpha3={:.6f} alpha4={:.6f} beta3={:.6f} beta4={:.6f} '
+                          'mod3={:.6f} mod4={:.6f} w3=[{:.4f},{:.4f},{:.4f}] w4=[{:.4f},{:.4f},{:.4f}]'.format(
+                              self.cross_scale_interaction.alpha3.item(), self.cross_scale_interaction.alpha4.item(),
+                              self.amhcsfi_res_refiner.refine_beta3.item(), self.amhcsfi_res_refiner.refine_beta4.item(),
+                              d['modulation3'].mean().item(), d['modulation4'].mean().item(),
+                              w3[0].item(), w3[1].item(), w3[2].item(), w4[0].item(), w4[1].item(), w4[2].item()), flush=True)
                 if self.variant in self.COARSE_GUIDE_VARIANTS:
                     print('[E4-CG sanity] coarse={} coarse_up={} gamma={:.6f} hierarchical={}'.format(
                         tuple(coarse_logits.shape), tuple(coarse_up.shape), self.coarse_guidance.gamma.item(),
@@ -579,8 +860,15 @@ class TROGeoMSDetectionAblation(nn.Module):
                     print('[E4-HABR sanity] mode={} prior={} rounds={} lambda43={:.6f} lambda34={:.6f} '
                           'offset_mean={:.6f}'.format(
                               self.habr_former.mode, self.habr_former.use_prior, self.habr_former.rounds,
-                              habr_diagnostics['lambda43'].item(), habr_diagnostics['lambda34'].item(),
-                              habr_diagnostics['offset_mean'].item()), flush=True)
+                               habr_diagnostics['lambda43'].item(), habr_diagnostics['lambda34'].item(),
+                               habr_diagnostics['offset_mean'].item()), flush=True)
+                if self.variant in self.QUERY_REFINE_VARIANTS:
+                    print('[E4-PQRA sanity] q3_tokens={} q4_tokens={} p3_tokens={} p4_tokens={} '
+                          'alpha3={:.6f} alpha4={:.6f} delta3_norm={:.6f} delta4_norm={:.6f}'.format(
+                              tuple(q3_tokens.shape), tuple(q4_tokens.shape),
+                              tuple(pqra_position3.shape), tuple(pqra_position4.shape),
+                              self.query_refine3.alpha.item(), self.query_refine4.alpha.item(),
+                              pqra_delta3.norm().item(), pqra_delta4.norm().item()), flush=True)
                 if self.need_query_stage2:
                     print('[Stage2-LE sanity] q2={} no_stage2_ca=True no_stage2_head=True'.format(
                         tuple(q2.shape)), flush=True)
