@@ -1,5 +1,23 @@
 # SAM prompt experiment log
 
+## E4: bidirectional Guidance / CSFI ablation (Swin-T, DroneAerial)
+
+- Protocol: shared Swin-T, batch size 7, 24 workers, seed 2024, learning rate
+  `1e-4`, 25 epochs, and ordinary `--standard_rng`. Checkpoints are selected by
+  validation Acc@0.50. Values below are validation metrics at each selected
+  checkpoint; they are not test-set selection results.
+
+| Experiment | Variant | Best epoch | Acc@0.50 | Acc@0.25 | Mean IoU | Center Acc |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Bi-NoCSFI | `h2_ind_bi_nocsfi` | 22 | 61.65% | **70.86%** | 48.59% | 24.49% |
+| A3-Bi | `h2_ind_csfi_bi` | 23 | 61.86% | **71.40%** | **48.68%** | **26.33%** |
+| AMH-CSFI-Bi | `h2_ind_amhcsfi_bi` | 21 | 61.21% | 70.10% | 47.96% | 24.92% |
+| MH-CSFI-Bi | `h2_ind_mhcsfi_bi` | 24 | **62.51%** | 70.10% | 48.67% | 24.81% |
+
+- Interpretation: `h2_ind_amhcsfi_bi` and `h2_ind_mhcsfi_bi` replace the
+  interaction implementation; this table is therefore an ablation record, not
+  evidence that either method improves every metric over A3-Bi.
+
 ## P01: frozen original YOLO head with SAM PromptFusion
 
 - Base commit: `ff257e8` (upstream original DetGeo baseline).
