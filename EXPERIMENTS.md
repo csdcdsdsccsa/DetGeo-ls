@@ -464,3 +464,19 @@ Block-8 tokens form Stage3; block-12 tokens are pooled 2x for Stage4; learned
 1x1 projections preserve E4's 384/768-channel interfaces. Both runs use the
 ordinary `--standard_rng` protocol, seed 2024, batch 7, workers 24, lr 1e-4,
 and 25 epochs. Each validation-best checkpoint is tested once.
+
+# E4 FG-Res DetGeo PE / DADPE natural-RNG sequence
+
+This sequence fixes `h2_ind_fg_amhcsfi_res` and changes only its front end:
+
+- `DetGeo-PE`: original DetGeo `1x1 Conv + BN + LeakyReLU` position encoder,
+  distance click map, no DADPE.
+- `DADPE-B`: the same front end plus the input direction residual.
+- `MS-DADPE-D`: the same front end plus input and Stage3/Stage4 direction
+  residuals.
+
+Every model uses `--standard_rng --seed 2024`, with ordinary module creation:
+there is no RNG padding, save/restore, post-construction reseed, or
+cross-model initialization matching. The three runs use batch 7, workers 24,
+Swin-T, 25 epochs and `lr=1e-4`; each validation-best checkpoint is tested
+once. Results: pending.

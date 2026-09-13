@@ -524,8 +524,9 @@ class TROGeoMSDetectionAblation(nn.Module):
             raise ValueError('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
         if dadpe_mode not in ('none', 'input', 'multiscale'):
             raise ValueError('dadpe_mode must be none/input/multiscale')
-        if dadpe_mode != 'none' and (variant != 'h2_ind_csfi_bi' or position_mode != 'detgeo' or backbone != 'swin_t'):
-            raise ValueError('DADPE requires h2_ind_csfi_bi, original DetGeo PE, and Swin-T')
+        if dadpe_mode != 'none' and (variant not in ('h2_ind_csfi_bi', 'h2_ind_fg_amhcsfi_res')
+                                     or position_mode != 'detgeo' or backbone != 'swin_t'):
+            raise ValueError('DADPE requires A3-Bi or FG-Res, original DetGeo PE, and Swin-T')
         self.variant = variant
         self.position_mode = position_mode
         self.backbone_name = backbone
@@ -682,14 +683,12 @@ class TROGeoMSDetectionAblation(nn.Module):
             self.pqra_pos_proj4 = _make_pe_mlp(768)
             self.query_refine3 = PositionQueryRefinement(dim=384, heads=6, dim_head=64)
             self.query_refine4 = PositionQueryRefinement(dim=768, heads=12, dim_head=64)
-        # Construct only after A3-Bi, and restore CPU RNG afterwards, so DADPE
-        # cannot perturb shared initialization or later standard-RNG behavior.
+        # DADPE is deliberately constructed under ordinary standard RNG.  Its
+        # parameters therefore naturally advance the model/DataLoader RNG path.
         if self.dadpe_mode != 'none':
-            rng_state = torch.get_rng_state()
             self.input_direction_residual = InputDirectionResidual()
             if self.dadpe_mode == 'multiscale':
                 self.multiscale_direction_residual = MultiScaleDirectionResidual()
-            torch.set_rng_state(rng_state)
         # v1 follows ordinary standard RNG; v2a pads/restores only to reproduce
         # v1's exact post-construction RNG state for the controlled comparison.
         if self.enable_hqs:
