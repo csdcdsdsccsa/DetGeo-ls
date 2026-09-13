@@ -196,6 +196,12 @@ def main():
     parser.add_argument('--hqs_v2a', action='store_true',
                         help='HQS-v2a: frozen FG-Res with balanced pairwise head ranking')
     parser.add_argument('--hqs_rank_epsilon', default=0.03, type=float)
+    parser.add_argument('--hqs_rank_threshold', default=0.0, type=float,
+                        help='HQS-v2a inference threshold: rank_logit >= threshold selects Head3')
+    parser.add_argument('--hqs_v2a_rank_diag', action='store_true',
+                        help='validation-only HQS-v2a rank separability and threshold-sweep diagnostic')
+    parser.add_argument('--hqs_v2a_rank_diag_prefix', default='results/hqs_v2a_rank_diag', type=str,
+                        help='output prefix for HQS-v2a rank diagnostic CSV files')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
     parser.add_argument('--sam_multimask_root', default='', help='optional root of split-indexed SAM multi-mask npz files')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
@@ -309,6 +315,15 @@ def main():
             parser.error('--hqs_rank_epsilon must be in [0,1)')
         if not (args.test or args.val) and not (args.pretrain or args.resume):
             parser.error('HQS-v2a training requires the completed FG-Res checkpoint')
+    if args.hqs_v2a_rank_diag:
+        if not args.hqs_v2a:
+            parser.error('--hqs_v2a_rank_diag requires --hqs_v2a')
+        if args.trogeo_ms_det_variant != 'h2_ind_fg_amhcsfi_res':
+            parser.error('--hqs_v2a_rank_diag requires --trogeo_ms_det_variant h2_ind_fg_amhcsfi_res')
+        if not args.val or args.test:
+            parser.error('--hqs_v2a_rank_diag is validation-only; use --val and do not use --test')
+        if args.hqs_oracle_diag:
+            parser.error('--hqs_v2a_rank_diag and --hqs_oracle_diag are separate diagnostics')
     if args.trogeo_ms_det_variant in ('h3_ind', 'h3_adaptive') and not (args.test or args.val):
         parser.error('H3 variants are inference-only: train h2_ind then evaluate its best checkpoint')
     if not 0.0 <= args.h3_iou_threshold <= 1.0:
@@ -737,7 +752,8 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
             loss_geo = loss_cls = None
         if args.hqs_v2a:
             final_box, diagnostics = select_two_heads_hqs_v2a(
-                p3, p4, predictions['hqs_rank_logit'], anchors_full, args.img_size)
+                p3, p4, predictions['hqs_rank_logit'], anchors_full, args.img_size,
+                threshold=args.hqs_rank_threshold)
         elif args.hqs_v1:
             final_box, diagnostics = select_two_heads_hqs(
                 p3, p4, predictions['hqs_logits'], anchors_full, args.img_size)
@@ -986,6 +1002,31 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
             print(print_str)
             logging.info(print_str)
 
+
+def binary_pairwise_auc(positive_scores, negative_scores):
+    """ROC-AUC without an sklearn dependency; positive means Head3 is better."""
+    if positive_scores.numel() == 0 or negative_scores.numel() == 0:
+        return float('nan')
+    difference = positive_scores[:, None] - negative_scores[None, :]
+    return float(difference.gt(0).float().mean() + 0.5 * difference.eq(0).float().mean())
+
+
+def describe_rank_logits(name, values):
+    """Log a compact distribution report for one HQS-v2a ranking class."""
+    if values.numel() == 0:
+        text = '{}: empty'.format(name)
+    else:
+        values = values.float()
+        text = ('{}: N={} mean={:.6f} std={:.6f} median={:.6f} q25={:.6f} '
+                'q75={:.6f} min={:.6f} max={:.6f}').format(
+                    name, values.numel(), values.mean().item(), values.std(unbiased=False).item(),
+                    values.median().item(), torch.quantile(values, 0.25).item(),
+                    torch.quantile(values, 0.75).item(), values.min().item(), values.max().item())
+    print(text)
+    logging.info(text)
+    return text
+
+
 def test_epoch(data_loader, model, args):
     batch_time = AverageMeter()
     avg_accu50 = AverageMeter()
@@ -1002,6 +1043,8 @@ def test_epoch(data_loader, model, args):
         'recover_acc25': AverageMeter(),
     }
     oracle_rows = []
+    rank_diag_logits, rank_diag_box3, rank_diag_box4 = [], [], []
+    rank_diag_gt, rank_diag_iou3, rank_diag_iou4, rank_diag_sample_index = [], [], [], []
 
     def oracle_meters(mode_name):
         if mode_name not in oracle_metric_meters:
@@ -1041,8 +1084,9 @@ def test_epoch(data_loader, model, args):
                     p4_rank = prediction_output['stage4'].view(prediction_output['stage4'].shape[0], 9, 5, 64, 64)
                     box3_rank, _ = decode_top1(p3_rank, anchors_full, args.img_size)
                     box4_rank, _ = decode_top1(p4_rank, anchors_full, args.img_size)
-                    signed_gap = bbox_iou(box3_rank, ori_gt_bbox, x1y1x2y2=True) - bbox_iou(
-                        box4_rank, ori_gt_bbox, x1y1x2y2=True)
+                    iou3_rank = bbox_iou(box3_rank, ori_gt_bbox, x1y1x2y2=True)
+                    iou4_rank = bbox_iou(box4_rank, ori_gt_bbox, x1y1x2y2=True)
+                    signed_gap = iou3_rank - iou4_rank
                     valid_rank = signed_gap.abs() > args.hqs_rank_epsilon
                     valid_count = int(valid_rank.sum().item())
                     if valid_count:
@@ -1052,6 +1096,21 @@ def test_epoch(data_loader, model, args):
                             float(agreement), valid_count)
                     diagnostic_meters.setdefault('hqs_v2a_valid_ratio', AverageMeter()).update(
                         float(valid_rank.float().mean()), query_imgs.shape[0])
+                    if args.hqs_v2a_rank_diag:
+                        rank_logit = prediction_output['hqs_rank_logit'].detach()
+                        zero_box = torch.where((rank_logit >= 0.0)[:, None], box3_rank, box4_rank)
+                        if abs(args.hqs_rank_threshold) < 1e-12:
+                            max_diff = (zero_box - final_box).abs().max().item()
+                            if max_diff > 1e-4:
+                                raise RuntimeError('HQS-v2a rank diagnostic failed to reproduce threshold=0 '
+                                                   'decoder: max_diff={:.8f}'.format(max_diff))
+                        rank_diag_logits.append(rank_logit.cpu())
+                        rank_diag_box3.append(box3_rank.detach().cpu())
+                        rank_diag_box4.append(box4_rank.detach().cpu())
+                        rank_diag_gt.append(ori_gt_bbox.detach().cpu())
+                        rank_diag_iou3.append(iou3_rank.detach().cpu())
+                        rank_diag_iou4.append(iou4_rank.detach().cpu())
+                        rank_diag_sample_index.append(sample_index.detach().cpu())
                 if args.hqs_oracle_diag:
                     p3 = prediction_output['stage3'].view(prediction_output['stage3'].shape[0], 9, 5, 64, 64)
                     p4 = prediction_output['stage4'].view(prediction_output['stage4'].shape[0], 9, 5, 64, 64)
@@ -1179,6 +1238,95 @@ def test_epoch(data_loader, model, args):
                 writer.writeheader()
                 writer.writerows(oracle_rows)
             print('HQS Oracle CSV: {}'.format(args.hqs_oracle_csv))
+
+    if args.hqs_v2a_rank_diag:
+        rank_logits = torch.cat(rank_diag_logits, dim=0)
+        box3_all, box4_all = torch.cat(rank_diag_box3, dim=0), torch.cat(rank_diag_box4, dim=0)
+        gt_all = torch.cat(rank_diag_gt, dim=0)
+        iou3_all, iou4_all = torch.cat(rank_diag_iou3, dim=0), torch.cat(rank_diag_iou4, dim=0)
+        sample_all = torch.cat(rank_diag_sample_index, dim=0)
+        gap = iou3_all - iou4_all
+        valid = gap.abs() > args.hqs_rank_epsilon
+        head3_better = gap > args.hqs_rank_epsilon
+        head4_better = gap < -args.hqs_rank_epsilon
+        oracle_use3 = gap > 0.0
+
+        print('================ HQS-v2a RANK DIAGNOSTIC ================')
+        logging.info('================ HQS-v2a RANK DIAGNOSTIC ================')
+        print('Checkpoint diagnostic: epsilon={:.6f}, valid={:.2f}% ({}/{})'.format(
+            args.hqs_rank_epsilon, 100.0 * valid.float().mean().item(), int(valid.sum().item()), len(valid)))
+        logging.info('HQS-v2a rank diagnostic epsilon=%f valid=%d/%d',
+                     args.hqs_rank_epsilon, int(valid.sum().item()), len(valid))
+        describe_rank_logits('Head3-better', rank_logits[head3_better])
+        describe_rank_logits('Head4-better', rank_logits[head4_better])
+        describe_rank_logits('All', rank_logits)
+        auc = binary_pairwise_auc(rank_logits[head3_better], rank_logits[head4_better])
+        auc_text = 'ROC-AUC = {:.6f}'.format(auc)
+        print(auc_text)
+        logging.info(auc_text)
+
+        threshold_min, threshold_max = rank_logits.min().item() - 1e-6, rank_logits.max().item() + 1e-6
+        thresholds = torch.cat((torch.linspace(threshold_min, threshold_max, steps=201), torch.tensor([0.0])))
+        thresholds, _ = torch.sort(torch.unique(thresholds))
+        sweep_rows = []
+        for threshold in thresholds:
+            threshold_value = float(threshold)
+            use3 = rank_logits >= threshold_value
+            selected_box = torch.where(use3[:, None], box3_all, box4_all)
+            acc50, acc25, miou, center = eval_decoded_boxes(selected_box, gt_all, args.img_size)
+            agreement = float((use3[valid] == oracle_use3[valid]).float().mean()) if valid.any() else float('nan')
+            sweep_rows.append({
+                'threshold': threshold_value,
+                'head3_ratio': float(use3.float().mean()),
+                'head4_ratio': float((~use3).float().mean()),
+                'acc50': float(acc50), 'acc25': float(acc25), 'miou': float(miou),
+                'center_acc': float(center), 'oracle_agreement_valid': agreement,
+            })
+        zero_row = next(row for row in sweep_rows if abs(row['threshold']) < 1e-12)
+        online_metrics = (float(avg_accu50.avg), float(avg_accu25.avg), float(avg_iou.avg), float(avg_accu_center.avg))
+        zero_metrics = (zero_row['acc50'], zero_row['acc25'], zero_row['miou'], zero_row['center_acc'])
+        if abs(args.hqs_rank_threshold) < 1e-12 and max(abs(a - b) for a, b in zip(online_metrics, zero_metrics)) > 1e-6:
+            raise RuntimeError('HQS-v2a threshold=0 sweep does not reproduce validation metrics: '
+                               'online={} sweep={}'.format(online_metrics, zero_metrics))
+        best_row = max(sweep_rows, key=lambda row: (
+            round(row['acc50'], 12), round(row['miou'], 12), -abs(row['threshold'])))
+        print('Threshold=0: Head3={:.2f}% Head4={:.2f}% Acc@0.50={:.2f}% Acc@0.25={:.2f}% '
+              'mIoU={:.2f}% Center={:.2f}% OracleAgree={:.2f}%'.format(
+                  100.0 * zero_row['head3_ratio'], 100.0 * zero_row['head4_ratio'],
+                  100.0 * zero_row['acc50'], 100.0 * zero_row['acc25'], 100.0 * zero_row['miou'],
+                  100.0 * zero_row['center_acc'], 100.0 * zero_row['oracle_agreement_valid']))
+        print('BEST VALIDATION THRESHOLD: threshold={:.8f} Head3={:.2f}% Head4={:.2f}% '
+              'Acc@0.50={:.2f}% Acc@0.25={:.2f}% mIoU={:.2f}% Center={:.2f}% OracleAgree={:.2f}%'.format(
+                  best_row['threshold'], 100.0 * best_row['head3_ratio'], 100.0 * best_row['head4_ratio'],
+                  100.0 * best_row['acc50'], 100.0 * best_row['acc25'], 100.0 * best_row['miou'],
+                  100.0 * best_row['center_acc'], 100.0 * best_row['oracle_agreement_valid']))
+        print('Delta best-threshold vs threshold=0: Acc@0.50={:+.2f} pp mIoU={:+.2f} pp'.format(
+            100.0 * (best_row['acc50'] - zero_row['acc50']), 100.0 * (best_row['miou'] - zero_row['miou'])))
+        logging.info('HQS-v2a threshold=0 %s', zero_row)
+        logging.info('HQS-v2a best threshold %s', best_row)
+
+        for output_path, fieldnames, rows in (
+                (args.hqs_v2a_rank_diag_prefix + '_val_samples.csv',
+                 ('sample_index', 'rank_logit', 'iou3', 'iou4', 'iou_gap', 'valid', 'label'),
+                 ({
+                     'sample_index': int(sample_all[index]), 'rank_logit': float(rank_logits[index]),
+                     'iou3': float(iou3_all[index]), 'iou4': float(iou4_all[index]), 'iou_gap': float(gap[index]),
+                     'valid': int(valid[index]),
+                     'label': 'head3_better' if bool(head3_better[index]) else
+                              ('head4_better' if bool(head4_better[index]) else 'ignored'),
+                 } for index in range(rank_logits.numel()))),
+                (args.hqs_v2a_rank_diag_prefix + '_threshold_sweep.csv',
+                 ('threshold', 'head3_ratio', 'head4_ratio', 'acc50', 'acc25', 'miou', 'center_acc',
+                  'oracle_agreement_valid'), sweep_rows)):
+            directory = os.path.dirname(output_path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with open(output_path, 'w', newline='', encoding='utf-8') as csv_file:
+                writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            print('HQS-v2a rank diagnostic CSV: {}'.format(output_path))
+        print('==========================================================')
 
     return avg_accu50.avg
 

@@ -103,16 +103,21 @@ def select_two_heads_hqs(pred3, pred4, hqs_logits, anchors, image_wh):
     }
 
 
-def select_two_heads_hqs_v2a(pred3, pred4, rank_logit, anchors, image_wh):
-    """HQS-v2a pairwise ranking: rank >= 0 selects Head3; no fusion or GT."""
+def select_two_heads_hqs_v2a(pred3, pred4, rank_logit, anchors, image_wh, threshold=0.0):
+    """HQS-v2a pairwise ranking: rank >= threshold selects Head3.
+
+    ``threshold=0.0`` is the original HQS-v2a decoder.  The optional
+    threshold is inference-only and never changes the ranker or its loss.
+    """
     box3, _ = decode_top1(pred3, anchors, image_wh)
     box4, _ = decode_top1(pred4, anchors, image_wh)
-    use3 = rank_logit >= 0.0
+    use3 = rank_logit >= float(threshold)
     return torch.where(use3[:, None], box3, box4), {
         'hqs_v2a_stage3_selected': use3.float().mean(),
         'hqs_v2a_stage4_selected': (~use3).float().mean(),
         'hqs_v2a_abs_rank_logit': rank_logit.abs().mean(),
         'hqs_v2a_rank_logit_mean': rank_logit.mean(),
+        'hqs_v2a_threshold': rank_logit.new_tensor(float(threshold)),
     }
 
 
