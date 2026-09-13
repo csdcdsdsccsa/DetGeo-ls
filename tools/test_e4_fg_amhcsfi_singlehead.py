@@ -43,9 +43,9 @@ def main():
             if changed:
                 raise RuntimeError('{} changed public shared initialization: {}'.format(variant, changed[:3]))
         with torch.no_grad():
-            query = torch.randn(args.batch_size, 3, 1024, 1024, device='cuda')
+            query = torch.randn(args.batch_size, 3, 256, 256, device='cuda')
             reference = torch.randn(args.batch_size, 3, 1024, 1024, device='cuda')
-            click = torch.randn(args.batch_size, 1024, 1024, device='cuda')
+            click = torch.randn(args.batch_size, 256, 256, device='cuda')
             predictions, _ = model(query, reference, click)
         if tuple(predictions['single'].shape) != (args.batch_size, 45, 64, 64):
             raise RuntimeError('{} invalid single-head shape {}'.format(variant, tuple(predictions['single'].shape)))
