@@ -368,7 +368,7 @@ class TROGeoMSDetectionAblation(nn.Module):
                                  NO_CSFI_GUIDE_VARIANTS + CG_HABR_PRIOR_VARIANTS)
     CSFI_VARIANTS = (
         'h2_ind_csfi', 'h2_ind_csfi_cg', 'h2_ind_hier',
-        'h2_ind_csfi_fg', 'h2_ind_csfi_bi') + AMHCSFI_RES_BI_VARIANTS
+        'h2_ind_csfi_fg', 'h2_ind_csfi_bi') + AMHCSFI_RES_VARIANTS
     COARSE_GUIDE_VARIANTS = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier', 'h2_ind_csfi_bi',
                              'h2_ind_bi_nocsfi', 'h2_ind_cg_amhcsfi_res') + MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS + CG_HABR_PRIOR_VARIANTS + \
                             ADAPTIVE_CSFI_VARIANTS
@@ -502,8 +502,8 @@ class TROGeoMSDetectionAblation(nn.Module):
                 self.lambda4 = nn.Parameter(torch.tensor(0.05))
 
         if self.variant in self.CSFI_VARIANTS or self.variant in self.ADAPTIVE_CSFI_VARIANTS:
-            # Keep --standard_rng's ordinary trajectory: the added module
-            # naturally consumes RNG during its own initialization.
+            # AMHCSFI-Res reuses this original module.  Construct it at the
+            # exact ordinary-CSFI RNG position, before the matching guidance.
             self.cross_scale_interaction = CrossScaleFeatureInteraction()
         if self.variant in self.MHCSFI_VARIANTS:
             self.mh_cross_scale_interaction = MultiHeadCrossScaleFeatureInteraction(
@@ -517,11 +517,7 @@ class TROGeoMSDetectionAblation(nn.Module):
             self.coarse_guidance = CoarseGuidance()
         if self.variant in self.FINE_GUIDE_VARIANTS:
             self.fine_guidance = FineGuidance()
-        # These one-way variants must keep their original Guidance parameters
-        # at the same --standard_rng position as their no-CSFI baselines.
-        if self.variant in self.AMHCSFI_RES_GUIDE_VARIANTS:
-            self.cross_scale_interaction = CrossScaleFeatureInteraction()
-        # Must be after all A3-Bi public modules under --standard_rng.
+        # Must be after every corresponding ordinary-CSFI public module.
         if self.variant in self.AMHCSFI_RES_VARIANTS:
             self.amhcsfi_res_refiner = ResidualAdaptiveMultiReceptiveCSFI()
         if self.variant in self.HABR_VARIANTS:

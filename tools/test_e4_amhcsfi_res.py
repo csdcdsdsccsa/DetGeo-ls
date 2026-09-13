@@ -75,8 +75,8 @@ def main():
     if not torch.cuda.is_available():
         raise RuntimeError('a CUDA GPU is required')
     for base_variant, variant in (('h2_ind_csfi_bi', 'h2_ind_amhcsfi_res_bi'),
-                                  ('h2_ind_cg', 'h2_ind_cg_amhcsfi_res'),
-                                  ('h2_ind_fg_nocsfi', 'h2_ind_fg_amhcsfi_res')):
+                                  ('h2_ind_csfi_cg', 'h2_ind_cg_amhcsfi_res'),
+                                  ('h2_ind_csfi_fg', 'h2_ind_fg_amhcsfi_res')):
         check_variant(base_variant, variant, args.batch_size)
 
 
