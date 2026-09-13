@@ -3,6 +3,7 @@
 import os
 import sys
 import argparse
+import csv
 import time
 import random
 import logging
@@ -44,7 +45,8 @@ from model.multiscale_detection_loss import (multigrid_yolo_loss, two_head_yolo_
                                              three_head_yolo_loss_stage2_cls_half, coarse_heatmap_loss,
                                              rccd_consensus_loss)
 from utils.utils import AverageMeter, eval_iou_acc
-from utils.multiscale_detection import decode_multigrid_top1, decode_top1, select_two_heads, select_three_heads, eval_decoded_boxes
+from utils.multiscale_detection import (decode_multigrid_top1, decode_top1, select_two_heads, select_three_heads,
+                                        eval_decoded_boxes, analyze_two_head_oracle)
 from utils.checkpoint import save_checkpoint, load_pretrain
 
 
@@ -179,6 +181,10 @@ def main():
                         help='TROGeo click-position encoder: current double-conv or original DetGeo Conv-BN-Leaky')
     parser.add_argument('--trogeo_click_map_mode', choices=('distance', 'gaussian'), default='distance',
                         help='TROGeo click map: original distance-decay map or fixed Gaussian map')
+    parser.add_argument('--hqs_oracle_diag', action='store_true',
+                        help='validation-only Oracle head-selection diagnostic for FG-AMHCSFI-RES')
+    parser.add_argument('--hqs_oracle_csv', default='', type=str,
+                        help='optional CSV path for per-sample HQS Oracle diagnostics')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
     parser.add_argument('--sam_multimask_root', default='', help='optional root of split-indexed SAM multi-mask npz files')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
@@ -255,6 +261,14 @@ def main():
         parser.error('--trogeo_ms_det_variant requires --trogeo_backbone swin_t/vit_t/vit_s')
     if args.trogeo_backbone in ('vit_t', 'vit_s') and args.trogeo_ms_det_variant != 'h2_ind':
         parser.error('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
+    if args.hqs_oracle_diag:
+        if args.trogeo_ms_det_variant != 'h2_ind_fg_amhcsfi_res':
+            parser.error('--hqs_oracle_diag is restricted to '
+                         '--trogeo_ms_det_variant h2_ind_fg_amhcsfi_res')
+        if not args.val or args.test:
+            parser.error('--hqs_oracle_diag is validation-only; use --val and do not use --test')
+        if args.rccd:
+            parser.error('--hqs_oracle_diag must not be combined with RCCD')
     if args.trogeo_ms_det_variant in ('h3_ind', 'h3_adaptive') and not (args.test or args.val):
         parser.error('H3 variants are inference-only: train h2_ind then evaluate its best checkpoint')
     if not 0.0 <= args.h3_iou_threshold <= 1.0:
@@ -787,6 +801,23 @@ def test_epoch(data_loader, model, args):
     avg_iou = AverageMeter()
     avg_accu_center = AverageMeter()
     diagnostic_meters = {}
+    oracle_metric_meters = {}
+    oracle_extra_meters = {
+        'agreement': AverageMeter(), 'confidence_head3_ratio': AverageMeter(),
+        'oracle_head3_ratio': AverageMeter(), 'oracle_iou_gain': AverageMeter(),
+        'head3_better_ratio': AverageMeter(), 'head4_better_ratio': AverageMeter(),
+        'head_tie_ratio': AverageMeter(), 'recover_acc50': AverageMeter(),
+        'recover_acc25': AverageMeter(),
+    }
+    oracle_rows = []
+
+    def oracle_meters(mode_name):
+        if mode_name not in oracle_metric_meters:
+            oracle_metric_meters[mode_name] = {
+                'acc50': AverageMeter(), 'acc25': AverageMeter(),
+                'miou': AverageMeter(), 'center': AverageMeter(),
+            }
+        return oracle_metric_meters[mode_name]
     
     torch.cuda.empty_cache()
     model.eval()
@@ -797,7 +828,7 @@ def test_epoch(data_loader, model, args):
     anchors_full = torch.tensor(anchors_full, dtype=torch.float32).cuda()
 
     for batch_idx, batch in enumerate(data_loader):
-        query_imgs, rs_imgs, mat_clickxy, ori_gt_bbox, _, prompt_maps = unpack_batch(batch, args)
+        query_imgs, rs_imgs, mat_clickxy, ori_gt_bbox, sample_index, prompt_maps = unpack_batch(batch, args)
         query_imgs, rs_imgs = query_imgs.cuda(), rs_imgs.cuda()
         mat_clickxy = mat_clickxy.cuda()
         prompt_maps = tuple(prompt_map.cuda() for prompt_map in prompt_maps)
@@ -813,6 +844,55 @@ def test_epoch(data_loader, model, args):
                 accu_list = [accu50, accu25]
                 for name, value in diagnostics.items():
                     diagnostic_meters.setdefault(name, AverageMeter()).update(float(value), query_imgs.shape[0])
+                if args.hqs_oracle_diag:
+                    p3 = prediction_output['stage3'].view(prediction_output['stage3'].shape[0], 9, 5, 64, 64)
+                    p4 = prediction_output['stage4'].view(prediction_output['stage4'].shape[0], 9, 5, 64, 64)
+                    oracle_diag = analyze_two_head_oracle(
+                        p3, p4, ori_gt_bbox, anchors_full, args.img_size)
+                    max_selector_diff = (oracle_diag['confidence_box'] - final_box).abs().max().item()
+                    if max_selector_diff > 1e-4:
+                        raise RuntimeError('HQS Oracle diagnostic changed baseline decoding: '
+                                           'max box difference = {:.8f}'.format(max_selector_diff))
+                    batch_size = query_imgs.shape[0]
+                    for mode_name, mode_box in {
+                            'head3_only': oracle_diag['box3'], 'head4_only': oracle_diag['box4'],
+                            'confidence': oracle_diag['confidence_box'], 'oracle': oracle_diag['oracle_box'],
+                    }.items():
+                        a50, a25, miou, center = eval_decoded_boxes(mode_box, ori_gt_bbox, args.img_size)
+                        meters = oracle_meters(mode_name)
+                        meters['acc50'].update(float(a50), batch_size)
+                        meters['acc25'].update(float(a25), batch_size)
+                        meters['miou'].update(float(miou), batch_size)
+                        meters['center'].update(float(center), batch_size)
+                    extras = {
+                        'agreement': oracle_diag['agreement'].mean(),
+                        'confidence_head3_ratio': oracle_diag['confidence_use3'].float().mean(),
+                        'oracle_head3_ratio': oracle_diag['oracle_use3'].float().mean(),
+                        'head3_better_ratio': (oracle_diag['iou3'] > oracle_diag['iou4']).float().mean(),
+                        'head4_better_ratio': (oracle_diag['iou4'] > oracle_diag['iou3']).float().mean(),
+                        'head_tie_ratio': ((oracle_diag['iou3'] - oracle_diag['iou4']).abs() < 1e-6).float().mean(),
+                        'oracle_iou_gain': (oracle_diag['oracle_iou'] - oracle_diag['confidence_iou']).mean(),
+                        'recover_acc50': ((oracle_diag['oracle_iou'] > 0.50) &
+                                          (oracle_diag['confidence_iou'] <= 0.50)).float().mean(),
+                        'recover_acc25': ((oracle_diag['oracle_iou'] > 0.25) &
+                                          (oracle_diag['confidence_iou'] <= 0.25)).float().mean(),
+                    }
+                    for name, value in extras.items():
+                        oracle_extra_meters[name].update(float(value), batch_size)
+                    if args.hqs_oracle_csv:
+                        for index in range(batch_size):
+                            oracle_rows.append({
+                                'sample_index': int(sample_index[index]),
+                                'score3': float(oracle_diag['score3'][index]),
+                                'score4': float(oracle_diag['score4'][index]),
+                                'iou3': float(oracle_diag['iou3'][index]),
+                                'iou4': float(oracle_diag['iou4'][index]),
+                                'confidence_head': 3 if bool(oracle_diag['confidence_use3'][index]) else 4,
+                                'oracle_head': 3 if bool(oracle_diag['oracle_use3'][index]) else 4,
+                                'agreement': int(oracle_diag['agreement'][index]),
+                                'oracle_iou_gain': float(oracle_diag['oracle_iou'][index] -
+                                                         oracle_diag['confidence_iou'][index]),
+                            })
             else:
                 pred_anchor = prediction_output.view(prediction_output.shape[0], 9, 5,
                     prediction_output.shape[2], prediction_output.shape[3])
@@ -849,6 +929,48 @@ def test_epoch(data_loader, model, args):
         )
         print(diagnostic_text)
         logging.info(diagnostic_text)
+    if args.hqs_oracle_diag:
+        print('================ HQS ORACLE DIAGNOSTIC ================')
+        print('Mode                  Acc@0.50   Acc@0.25   mIoU     Center Acc')
+        for mode_name, label in (('head3_only', 'Head3 only'), ('head4_only', 'Head4 only'),
+                                 ('confidence', 'Confidence Selector'), ('oracle', 'Oracle Selector')):
+            meters = oracle_metric_meters[mode_name]
+            print('{:<22} {:>8.2f}   {:>8.2f}   {:>6.2f}   {:>8.2f}'.format(
+                label, 100.0 * meters['acc50'].avg, 100.0 * meters['acc25'].avg,
+                100.0 * meters['miou'].avg, 100.0 * meters['center'].avg))
+        confidence, oracle = oracle_metric_meters['confidence'], oracle_metric_meters['oracle']
+        print('Oracle - Confidence: Acc@0.50 {:+.2f} pp, Acc@0.25 {:+.2f} pp, mIoU {:+.2f} pp, Center {:+.2f} pp'.format(
+            100.0 * (oracle['acc50'].avg - confidence['acc50'].avg),
+            100.0 * (oracle['acc25'].avg - confidence['acc25'].avg),
+            100.0 * (oracle['miou'].avg - confidence['miou'].avg),
+            100.0 * (oracle['center'].avg - confidence['center'].avg)))
+        print('Selector diagnostics: agreement={:.2f}% confidence_head3={:.2f}% confidence_head4={:.2f}% '
+              'oracle_head3={:.2f}% oracle_head4={:.2f}%'.format(
+                  100.0 * oracle_extra_meters['agreement'].avg,
+                  100.0 * oracle_extra_meters['confidence_head3_ratio'].avg,
+                  100.0 * (1.0 - oracle_extra_meters['confidence_head3_ratio'].avg),
+                  100.0 * oracle_extra_meters['oracle_head3_ratio'].avg,
+                  100.0 * (1.0 - oracle_extra_meters['oracle_head3_ratio'].avg)))
+        print('Head complementarity: head3_better={:.2f}% head4_better={:.2f}% tie={:.2f}% '
+              'mean_oracle_iou_gain={:.4f} recover_acc50={:.2f}% recover_acc25={:.2f}%'.format(
+                  100.0 * oracle_extra_meters['head3_better_ratio'].avg,
+                  100.0 * oracle_extra_meters['head4_better_ratio'].avg,
+                  100.0 * oracle_extra_meters['head_tie_ratio'].avg,
+                  oracle_extra_meters['oracle_iou_gain'].avg,
+                  100.0 * oracle_extra_meters['recover_acc50'].avg,
+                  100.0 * oracle_extra_meters['recover_acc25'].avg))
+        print('=======================================================')
+        if args.hqs_oracle_csv:
+            csv_directory = os.path.dirname(args.hqs_oracle_csv)
+            if csv_directory:
+                os.makedirs(csv_directory, exist_ok=True)
+            with open(args.hqs_oracle_csv, 'w', newline='', encoding='utf-8') as csv_file:
+                writer = csv.DictWriter(csv_file, fieldnames=(
+                    'sample_index', 'score3', 'score4', 'iou3', 'iou4', 'confidence_head',
+                    'oracle_head', 'agreement', 'oracle_iou_gain'))
+                writer.writeheader()
+                writer.writerows(oracle_rows)
+            print('HQS Oracle CSV: {}'.format(args.hqs_oracle_csv))
 
     return avg_accu50.avg
 

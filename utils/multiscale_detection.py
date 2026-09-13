@@ -90,6 +90,32 @@ def select_two_heads(pred3, pred4, anchors, image_wh, fusion=False, iou_threshol
     return selected, diagnostics
 
 
+@torch.no_grad()
+def analyze_two_head_oracle(pred3, pred4, target_bbox, anchors, image_wh):
+    """Validation-only GT-oracle upper bound for two-head selection.
+
+    This diagnostic must never be used by the inference decoder: it chooses a
+    head with the ground-truth IoU solely to quantify head complementarity.
+    """
+    box3, score3 = decode_top1(pred3, anchors, image_wh)
+    box4, score4 = decode_top1(pred4, anchors, image_wh)
+    iou3 = bbox_iou(box3, target_bbox, x1y1x2y2=True)
+    iou4 = bbox_iou(box4, target_bbox, x1y1x2y2=True)
+    confidence_use3 = score3 >= score4
+    oracle_use3 = iou3 >= iou4
+    confidence_box = torch.where(confidence_use3[:, None], box3, box4)
+    oracle_box = torch.where(oracle_use3[:, None], box3, box4)
+    confidence_iou = torch.where(confidence_use3, iou3, iou4)
+    return {
+        'box3': box3, 'box4': box4,
+        'confidence_box': confidence_box, 'oracle_box': oracle_box,
+        'score3': score3, 'score4': score4, 'iou3': iou3, 'iou4': iou4,
+        'confidence_iou': confidence_iou, 'oracle_iou': torch.maximum(iou3, iou4),
+        'confidence_use3': confidence_use3, 'oracle_use3': oracle_use3,
+        'agreement': confidence_use3.eq(oracle_use3).float(),
+    }
+
+
 def select_three_heads(pred2, pred3, pred4, anchors, image_wh):
     """E7: extend E4 winner-takes-all decoding from two heads to three heads."""
     box2, score2 = decode_top1(pred2, anchors, image_wh)
