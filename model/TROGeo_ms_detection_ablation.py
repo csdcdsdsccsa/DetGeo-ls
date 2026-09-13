@@ -265,6 +265,26 @@ class ResidualAdaptiveMultiReceptiveCSFI(nn.Module):
                                 'weights3': weights3, 'weights4': weights4}
 
 
+class AdaptiveStage34Fusion(nn.Module):
+    """Sample-adaptive fusion of AMHCSFI-refined Stage3 and aligned Stage4."""
+
+    def __init__(self, channels=384, hidden_dim=128):
+        super().__init__()
+        self.weight_predictor = nn.Sequential(
+            nn.Linear(channels * 2, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, 2))
+        nn.init.zeros_(self.weight_predictor[-1].weight)
+        nn.init.zeros_(self.weight_predictor[-1].bias)
+
+    def forward(self, z3, z4_aligned):
+        if z3.shape != z4_aligned.shape:
+            raise RuntimeError('AdaptiveStage34Fusion requires equal feature shapes, got {} and {}'.format(
+                tuple(z3.shape), tuple(z4_aligned.shape)))
+        descriptor = torch.cat((z3.mean(dim=(2, 3)), z4_aligned.mean(dim=(2, 3))), dim=1)
+        weights = torch.softmax(self.weight_predictor(descriptor), dim=1)
+        fused = weights[:, 0].view(-1, 1, 1, 1) * z3 + weights[:, 1].view(-1, 1, 1, 1) * z4_aligned
+        return fused, weights
+
+
 class AdaptiveCSFIReliability(nn.Module):
     """Optional channel and sample-adaptive directional reliability for CSFI."""
 
@@ -459,7 +479,10 @@ class TROGeoMSDetectionAblation(nn.Module):
     ADAPTIVE_CSFI_VARIANTS = ('h2_ind_csfi_cg_channel', 'h2_ind_csfi_cg_dir', 'h2_ind_csfi_cg_ar')
     MHCSFI_VARIANTS = ('h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi')
     AMHCSFI_RES_BI_VARIANTS = ('h2_ind_amhcsfi_res_bi',)
-    AMHCSFI_RES_GUIDE_VARIANTS = ('h2_ind_cg_amhcsfi_res', 'h2_ind_fg_amhcsfi_res')
+    FG_AMHCSFI_RES_SINGLE_VARIANTS = (
+        'h2_ind_fg_amhcsfi_res_s3', 'h2_ind_fg_amhcsfi_res_s4', 'h2_ind_fg_amhcsfi_res_afuse')
+    AMHCSFI_RES_GUIDE_VARIANTS = ('h2_ind_cg_amhcsfi_res', 'h2_ind_fg_amhcsfi_res') + \
+                                  FG_AMHCSFI_RES_SINGLE_VARIANTS
     AMHCSFI_RES_VARIANTS = AMHCSFI_RES_BI_VARIANTS + AMHCSFI_RES_GUIDE_VARIANTS
     ADAPTIVE_CSFI_CHANNEL_VARIANTS = ('h2_ind_csfi_cg_channel', 'h2_ind_csfi_cg_ar')
     ADAPTIVE_CSFI_DIRECTION_VARIANTS = ('h2_ind_csfi_cg_dir', 'h2_ind_csfi_cg_ar')
@@ -474,8 +497,10 @@ class TROGeoMSDetectionAblation(nn.Module):
                              'h2_ind_bi_nocsfi', 'h2_ind_cg_amhcsfi_res') + MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS + CG_HABR_PRIOR_VARIANTS + \
                             ADAPTIVE_CSFI_VARIANTS
     FINE_GUIDE_VARIANTS = ('h2_ind_csfi_fg', 'h2_ind_csfi_bi', 'h2_ind_fg_nocsfi', 'h2_ind_bi_nocsfi',
-                           'h2_ind_fg_amhcsfi_res') + MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS
-    FINE_ONLY_GUIDE_VARIANTS = ('h2_ind_csfi_fg', 'h2_ind_fg_nocsfi', 'h2_ind_fg_amhcsfi_res')
+                           'h2_ind_fg_amhcsfi_res') + FG_AMHCSFI_RES_SINGLE_VARIANTS + \
+                          MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS
+    FINE_ONLY_GUIDE_VARIANTS = ('h2_ind_csfi_fg', 'h2_ind_fg_nocsfi', 'h2_ind_fg_amhcsfi_res') + \
+                               FG_AMHCSFI_RES_SINGLE_VARIANTS
     BIDIR_GUIDE_VARIANTS = ('h2_ind_csfi_bi', 'h2_ind_bi_nocsfi') + MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS
     HABR_VARIANTS = ('h2_ind_habr_core', 'h2_ind_habr_prior', 'h2_ind_habr_adapt', 'h2_ind_habr') + \
                     CG_HABR_PRIOR_VARIANTS
@@ -552,6 +577,10 @@ class TROGeoMSDetectionAblation(nn.Module):
             )
             if variant == 'h2_shared':
                 self.det_head_shared = nn.Conv2d(384, 45, kernel_size=1)
+            elif variant in self.FG_AMHCSFI_RES_SINGLE_VARIANTS:
+                self.det_head_single = nn.Conv2d(384, 45, kernel_size=1)
+                _rng_pad_stage4_head = nn.Conv2d(384, 45, kernel_size=1)
+                del _rng_pad_stage4_head
             else:  # H2/H3 variants deliberately share the independent-head state layout.
                 self.det_head_stage3 = nn.Conv2d(384, 45, kernel_size=1)
                 self.det_head_stage4 = nn.Conv2d(384, 45, kernel_size=1)
@@ -634,6 +663,10 @@ class TROGeoMSDetectionAblation(nn.Module):
         # Must be after every corresponding ordinary-CSFI public module.
         if self.variant in self.AMHCSFI_RES_VARIANTS:
             self.amhcsfi_res_refiner = ResidualAdaptiveMultiReceptiveCSFI()
+        if self.variant == 'h2_ind_fg_amhcsfi_res_afuse':
+            rng_state = torch.get_rng_state()
+            self.stage34_adaptive_fusion = AdaptiveStage34Fusion(channels=384, hidden_dim=128)
+            torch.set_rng_state(rng_state)
         if self.variant in self.HABR_VARIANTS:
             self.habr_former = HABRFormer(mode=self.HABR_MODE[self.variant], relation_dim=256,
                                           num_samples=4, num_heads=4, window_size=4, offset_scale=2.0)
@@ -911,6 +944,22 @@ class TROGeoMSDetectionAblation(nn.Module):
             self._expect('E2 p3', p3, 30, 64, 64)
             self._expect('E2 p4', p4, 15, 32, 32)
             predictions = {'stage3': p3, 'stage4': p4}
+        elif self.variant in self.FG_AMHCSFI_RES_SINGLE_VARIANTS:
+            aligned4 = self.stage4_align(z4)
+            fusion_weights = None
+            if self.variant == 'h2_ind_fg_amhcsfi_res_s3':
+                detection_feature = z3
+            elif self.variant == 'h2_ind_fg_amhcsfi_res_s4':
+                detection_feature = aligned4
+            elif self.variant == 'h2_ind_fg_amhcsfi_res_afuse':
+                detection_feature, fusion_weights = self.stage34_adaptive_fusion(z3, aligned4)
+            else:
+                raise RuntimeError('Unsupported FG-AMHCSFI single-head variant')
+            p = self.det_head_single(detection_feature)
+            self._expect('FG-AMHCSFI single head', p, 45, 64, 64)
+            predictions = {'single': p, 'fine_logits': fine_logits}
+            if fusion_weights is not None:
+                predictions['fusion_weights'] = fusion_weights
         elif self.variant in self.HIER_VARIANTS:
             p3 = self.det_head_stage3(z3)
             prior = F.interpolate(torch.sigmoid(coarse_logits), size=p3.shape[-2:],
@@ -1021,6 +1070,10 @@ class TROGeoMSDetectionAblation(nn.Module):
                               self.amhcsfi_res_refiner.refine_beta3.item(), self.amhcsfi_res_refiner.refine_beta4.item(),
                               d['modulation3'].mean().item(), d['modulation4'].mean().item(),
                               w3[0].item(), w3[1].item(), w3[2].item(), w4[0].item(), w4[1].item(), w4[2].item()), flush=True)
+                if self.variant == 'h2_ind_fg_amhcsfi_res_afuse':
+                    mean_weights = fusion_weights.mean(dim=0)
+                    print('[E4-FG-AMHCSFI-AFuse sanity] w3={:.6f} w4={:.6f} sum={:.6f}'.format(
+                        mean_weights[0].item(), mean_weights[1].item(), mean_weights.sum().item()), flush=True)
                 if self.variant in self.COARSE_GUIDE_VARIANTS:
                     print('[E4-CG sanity] coarse={} coarse_up={} gamma={:.6f} hierarchical={}'.format(
                         tuple(coarse_logits.shape), tuple(coarse_up.shape), self.coarse_guidance.gamma.item(),
