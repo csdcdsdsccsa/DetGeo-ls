@@ -7,6 +7,7 @@ import csv
 import time
 import random
 import logging
+import math
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -195,6 +196,8 @@ def main():
     parser.add_argument('--hqs_gap_delta', default=0.30, type=float)
     parser.add_argument('--hqs_v2a', action='store_true',
                         help='HQS-v2a: frozen FG-Res with balanced pairwise head ranking')
+    parser.add_argument('--hqs_v2b', action='store_true',
+                        help='HQS-v2b: prediction-quality-aware pairwise head ranking')
     parser.add_argument('--hqs_rank_epsilon', default=0.03, type=float)
     parser.add_argument('--hqs_rank_threshold', default=0.0, type=float,
                         help='HQS-v2a inference threshold: rank_logit >= threshold selects Head3')
@@ -202,6 +205,8 @@ def main():
                         help='validation-only HQS-v2a rank separability and threshold-sweep diagnostic')
     parser.add_argument('--hqs_v2a_rank_diag_prefix', default='results/hqs_v2a_rank_diag', type=str,
                         help='output prefix for HQS-v2a rank diagnostic CSV files')
+    parser.add_argument('--hqs_v2b_rank_diag', action='store_true',
+                        help='validation-only HQS-v2b rank separability and threshold-sweep diagnostic')
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
     parser.add_argument('--sam_multimask_root', default='', help='optional root of split-indexed SAM multi-mask npz files')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
@@ -304,8 +309,8 @@ def main():
             parser.error('--hqs_temperature and --hqs_gap_delta must be positive')
         if not (args.test or args.val) and not (args.pretrain or args.resume):
             parser.error('HQS-v1 training requires the completed FG-Res checkpoint')
-    if args.hqs_v1 and args.hqs_v2a:
-        parser.error('--hqs_v1 and --hqs_v2a are mutually exclusive')
+    if sum((args.hqs_v1, args.hqs_v2a, args.hqs_v2b)) > 1:
+        parser.error('--hqs_v1, --hqs_v2a and --hqs_v2b are mutually exclusive')
     if args.hqs_v2a:
         if args.trogeo_ms_det_variant != 'h2_ind_fg_amhcsfi_res':
             parser.error('--hqs_v2a requires --trogeo_ms_det_variant h2_ind_fg_amhcsfi_res')
@@ -324,6 +329,22 @@ def main():
             parser.error('--hqs_v2a_rank_diag is validation-only; use --val and do not use --test')
         if args.hqs_oracle_diag:
             parser.error('--hqs_v2a_rank_diag and --hqs_oracle_diag are separate diagnostics')
+    if args.hqs_v2b:
+        if args.trogeo_ms_det_variant != 'h2_ind_fg_amhcsfi_res':
+            parser.error('--hqs_v2b requires --trogeo_ms_det_variant h2_ind_fg_amhcsfi_res')
+        if args.rccd or args.hqs_oracle_diag:
+            parser.error('--hqs_v2b cannot be combined with RCCD or --hqs_oracle_diag')
+        if not 0.0 <= args.hqs_rank_epsilon < 1.0:
+            parser.error('--hqs_rank_epsilon must be in [0,1)')
+        if not (args.test or args.val) and not (args.pretrain or args.resume):
+            parser.error('HQS-v2b training requires the completed FG-Res checkpoint')
+    if args.hqs_v2b_rank_diag:
+        if not args.hqs_v2b:
+            parser.error('--hqs_v2b_rank_diag requires --hqs_v2b')
+        if not args.val or args.test:
+            parser.error('--hqs_v2b_rank_diag is validation-only; use --val and do not use --test')
+        if args.hqs_oracle_diag:
+            parser.error('--hqs_v2b_rank_diag and --hqs_oracle_diag are separate diagnostics')
     if args.trogeo_ms_det_variant in ('h3_ind', 'h3_adaptive') and not (args.test or args.val):
         parser.error('H3 variants are inference-only: train h2_ind then evaluate its best checkpoint')
     if not 0.0 <= args.h3_iou_threshold <= 1.0:
@@ -463,7 +484,7 @@ def main():
                                            variant=args.trogeo_ms_det_variant,
                                            position_mode=args.trogeo_position_mode,
                                            dadpe_mode=args.dadpe_mode, enable_hqs=args.hqs_v1,
-                                           enable_hqs_v2a=args.hqs_v2a)
+                                           enable_hqs_v2a=args.hqs_v2a, enable_hqs_v2b=args.hqs_v2b)
     elif args.backbone_exp != 'baseline':
         model = DetGeoBackboneAblation(emb_size=args.emb_size, leaky=True, backbone_exp=args.backbone_exp)
     elif args.single_scale_ca:
@@ -523,6 +544,17 @@ def main():
             raise RuntimeError('HQS-v2a unexpectedly unfroze FG-Res parameters: {}'.format(trainable_names))
         print('[HQS-v2a] frozen FG-Res; trainable parameters={}'.format(
             sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)))
+    if args.hqs_v2b:
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        for parameter in model.module.head_prediction_quality_ranker.parameters():
+            parameter.requires_grad = True
+        trainable_names = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+        if not trainable_names or not all(name.startswith('module.head_prediction_quality_ranker.')
+                                          for name in trainable_names):
+            raise RuntimeError('HQS-v2b unexpectedly unfroze FG-Res parameters: {}'.format(trainable_names))
+        print('[HQS-v2b] frozen FG-Res; trainable parameters={}'.format(
+            sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)))
 
     if args.freeze_prompt_only:
         if not (args.sam_prompt or args.adaptive_sam_prompt or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae):
@@ -549,6 +581,9 @@ def main():
         optimizer = torch.optim.Adam(model.module.head_quality_selector.parameters(), lr=args.hqs_lr, betas=(0.9, 0.999))
     elif args.hqs_v2a:
         optimizer = torch.optim.Adam(model.module.head_pairwise_ranker.parameters(), lr=args.hqs_lr, betas=(0.9, 0.999))
+    elif args.hqs_v2b:
+        optimizer = torch.optim.Adam(model.module.head_prediction_quality_ranker.parameters(), lr=args.hqs_lr,
+                                     betas=(0.9, 0.999))
     elif trogeo_mode:
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
     elif args.sam_prompt or args.adaptive_sam_prompt or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae or args.adaptive_gaussian_field:
@@ -609,7 +644,9 @@ def main():
     else:
         for epoch in range(start_epoch, args.max_epoch):
             gc.collect()
-            if args.hqs_v2a:
+            if args.hqs_v2b:
+                train_hqs_v2b_epoch(train_loader, model, optimizer, epoch, args)
+            elif args.hqs_v2a:
                 train_hqs_v2a_epoch(train_loader, model, optimizer, epoch, args)
             elif args.hqs_v1:
                 train_hqs_epoch(train_loader, model, optimizer, epoch, args)
@@ -750,7 +787,7 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
                                                args.img_size, args.coarse_sigma)
         else:
             loss_geo = loss_cls = None
-        if args.hqs_v2a:
+        if args.hqs_v2a or args.hqs_v2b:
             final_box, diagnostics = select_two_heads_hqs_v2a(
                 p3, p4, predictions['hqs_rank_logit'], anchors_full, args.img_size,
                 threshold=args.hqs_rank_threshold)
@@ -783,6 +820,40 @@ def hqs_quality_loss(predictions, ori_gt_bbox, anchors_full, args):
     loss = (weight * per_sample).sum() / weight.sum().clamp_min(1e-6)
     hqs_use3 = predictions['hqs_logits'][:, 0] >= predictions['hqs_logits'][:, 1]
     return loss, {'agreement': (hqs_use3 == oracle_use3).float().mean(), 'gap': gap}
+
+
+@torch.no_grad()
+def build_hqs_v2b_quality_stats(predictions, anchors_full, image_wh):
+    """Return the seven detached prediction-quality statistics for HQS-v2b."""
+    p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)
+    p4 = predictions['stage4'].view(predictions['stage4'].shape[0], 9, 5, 64, 64)
+    batch_size = p3.shape[0]
+    conf3, conf4 = p3[:, :, 4].reshape(batch_size, -1), p4[:, :, 4].reshape(batch_size, -1)
+    prob3, prob4 = torch.softmax(conf3, dim=1), torch.softmax(conf4, dim=1)
+    top2_3, top2_4 = torch.topk(prob3, k=2, dim=1).values, torch.topk(prob4, k=2, dim=1).values
+    score3, score4 = top2_3[:, 0], top2_4[:, 0]
+    margin3, margin4 = top2_3[:, 0] - top2_3[:, 1], top2_4[:, 0] - top2_4[:, 1]
+    norm = math.log(float(prob3.shape[1]))
+    entropy3 = -(prob3 * torch.log(prob3.clamp_min(1e-12))).sum(dim=1) / norm
+    entropy4 = -(prob4 * torch.log(prob4.clamp_min(1e-12))).sum(dim=1) / norm
+    box3, _ = decode_top1(p3, anchors_full, image_wh)
+    box4, _ = decode_top1(p4, anchors_full, image_wh)
+    pair_iou = bbox_iou(box3, box4, x1y1x2y2=True).clamp(0.0, 1.0)
+    quality_stats = torch.stack((score3, score4, margin3, margin4, entropy3, entropy4, pair_iou), dim=1)
+    if quality_stats.shape != (batch_size, 7):
+        raise RuntimeError('Unexpected HQS-v2b statistics shape {}'.format(tuple(quality_stats.shape)))
+    return quality_stats, {
+        'score3': score3, 'score4': score4, 'margin3': margin3, 'margin4': margin4,
+        'entropy3': entropy3, 'entropy4': entropy4, 'pair_iou': pair_iou,
+    }
+
+
+def attach_hqs_v2b_rank_logit(model, predictions, anchors_full, args):
+    """Attach v2b's trainable rank logit after anchor-aware quality extraction."""
+    quality_stats, diagnostics = build_hqs_v2b_quality_stats(predictions, anchors_full, args.img_size)
+    predictions['hqs_rank_logit'] = model.module.head_prediction_quality_ranker(
+        predictions['hqs_feat3'].detach(), predictions['hqs_feat4'].detach(), quality_stats.detach())
+    return diagnostics
 
 
 def hqs_pairwise_ranking_loss(predictions, ori_gt_bbox, anchors_full, args):
@@ -854,6 +925,51 @@ def train_hqs_v2a_epoch(train_loader, model, optimizer, epoch, args):
         epoch, losses.avg, 100 * selected3 / max(total, 1), 100 * (1 - selected3 / max(total, 1)),
         100 * correct / max(valid, 1), 100 * valid / max(total, 1), target3, target4,
         100 * mixed / max(nonempty, 1))
+    print(summary); logging.info(summary)
+
+
+def train_hqs_v2b_epoch(train_loader, model, optimizer, epoch, args):
+    """Keep FG-Res frozen/eval; v2b changes only the ranker's input statistics."""
+    model.eval()
+    model.module.head_prediction_quality_ranker.train()
+    anchors = np.array([float(x.strip()) for x in args.anchors.split(',')]).reshape(-1, 2)[::-1].copy()
+    anchors = torch.tensor(anchors, dtype=torch.float32).cuda()
+    losses = AverageMeter()
+    total = valid = target3 = target4 = selected3 = correct = mixed = nonempty = 0
+    quality_totals = {'margin3': 0.0, 'margin4': 0.0, 'entropy3': 0.0, 'entropy4': 0.0, 'pair_iou': 0.0}
+    for batch_idx, batch in enumerate(train_loader):
+        query, rs, click, bbox, _, prompts = unpack_batch(batch, args)
+        query, rs, click = query.cuda(), rs.cuda(), click.cuda()
+        prompts = tuple(item.cuda() for item in prompts)
+        bbox = torch.clamp(bbox.cuda(), min=0, max=args.img_size - 1)
+        predictions, _ = forward_model(model, query, rs, click, prompts)
+        quality_diag = attach_hqs_v2b_rank_logit(model, predictions, anchors, args)
+        loss, diag = hqs_pairwise_ranking_loss(predictions, bbox, anchors, args)
+        optimizer.zero_grad(); loss.backward(); optimizer.step()
+        batch_size = query.shape[0]; losses.update(loss.item(), batch_size); total += batch_size
+        valid += diag['valid_count']; target3 += diag['target_head3_count']; target4 += diag['target_head4_count']
+        selected3 += diag['selected_head3_count']; correct += diag['agreement_correct']
+        for name in quality_totals:
+            quality_totals[name] += quality_diag[name].mean().item() * batch_size
+        if diag['valid_count']:
+            nonempty += 1; mixed += diag['mixed_class_batch']
+        if batch_idx % args.print_freq == 0:
+            text = ('[HQS-v2b] Epoch [{}/{}] batch {}/{} Loss {:.5f} SelectH3 {:.2f}% SelectH4 {:.2f}% '
+                    'OracleAgreeValid {:.2f}% Valid {:.2f}% TargetH3={} TargetH4={} '
+                    'M3={:.6f} M4={:.6f} H3={:.6f} H4={:.6f} PairIoU={:.4f}').format(
+                epoch, args.max_epoch, batch_idx, len(train_loader), losses.avg,
+                100 * selected3 / max(total, 1), 100 * (1 - selected3 / max(total, 1)),
+                100 * correct / max(valid, 1), 100 * valid / max(total, 1), target3, target4,
+                quality_diag['margin3'].mean().item(), quality_diag['margin4'].mean().item(),
+                quality_diag['entropy3'].mean().item(), quality_diag['entropy4'].mean().item(),
+                quality_diag['pair_iou'].mean().item())
+            print(text); logging.info(text)
+    summary = ('[HQS-v2b epoch summary] epoch={} Loss={:.6f} SelectH3={:.2f}% SelectH4={:.2f}% '
+               'OracleAgreeValid={:.2f}% Valid={:.2f}% TargetH3={} TargetH4={} MixedClassBatch={:.2f}% '
+               'M3={:.6f} M4={:.6f} H3={:.6f} H4={:.6f} PairIoU={:.4f}').format(
+        epoch, losses.avg, 100 * selected3 / max(total, 1), 100 * (1 - selected3 / max(total, 1)),
+        100 * correct / max(valid, 1), 100 * valid / max(total, 1), target3, target4,
+        100 * mixed / max(nonempty, 1), *(quality_totals[name] / max(total, 1) for name in quality_totals))
     print(summary); logging.info(summary)
 
 
@@ -1072,6 +1188,8 @@ def test_epoch(data_loader, model, args):
 
         with torch.no_grad():
             prediction_output, attn_score = forward_model(model, query_imgs, rs_imgs, mat_clickxy, prompt_maps)
+            if args.hqs_v2b:
+                attach_hqs_v2b_rank_logit(model, prediction_output, anchors_full, args)
             if is_ms_detection_variant(args):
                 _, _, _, final_box, diagnostics = _ms_predictions_and_loss(
                     prediction_output, ori_gt_bbox, anchors_full, args, include_loss=False)
@@ -1079,7 +1197,7 @@ def test_epoch(data_loader, model, args):
                 accu_list = [accu50, accu25]
                 for name, value in diagnostics.items():
                     diagnostic_meters.setdefault(name, AverageMeter()).update(float(value), query_imgs.shape[0])
-                if args.hqs_v2a:
+                if args.hqs_v2a or args.hqs_v2b:
                     p3_rank = prediction_output['stage3'].view(prediction_output['stage3'].shape[0], 9, 5, 64, 64)
                     p4_rank = prediction_output['stage4'].view(prediction_output['stage4'].shape[0], 9, 5, 64, 64)
                     box3_rank, _ = decode_top1(p3_rank, anchors_full, args.img_size)
@@ -1096,7 +1214,7 @@ def test_epoch(data_loader, model, args):
                             float(agreement), valid_count)
                     diagnostic_meters.setdefault('hqs_v2a_valid_ratio', AverageMeter()).update(
                         float(valid_rank.float().mean()), query_imgs.shape[0])
-                    if args.hqs_v2a_rank_diag:
+                    if args.hqs_v2a_rank_diag or args.hqs_v2b_rank_diag:
                         rank_logit = prediction_output['hqs_rank_logit'].detach()
                         zero_box = torch.where((rank_logit >= 0.0)[:, None], box3_rank, box4_rank)
                         if abs(args.hqs_rank_threshold) < 1e-12:
@@ -1239,7 +1357,7 @@ def test_epoch(data_loader, model, args):
                 writer.writerows(oracle_rows)
             print('HQS Oracle CSV: {}'.format(args.hqs_oracle_csv))
 
-    if args.hqs_v2a_rank_diag:
+    if args.hqs_v2a_rank_diag or args.hqs_v2b_rank_diag:
         rank_logits = torch.cat(rank_diag_logits, dim=0)
         box3_all, box4_all = torch.cat(rank_diag_box3, dim=0), torch.cat(rank_diag_box4, dim=0)
         gt_all = torch.cat(rank_diag_gt, dim=0)
