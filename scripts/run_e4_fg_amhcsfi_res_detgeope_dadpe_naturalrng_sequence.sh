@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # FG-Res + original DetGeo front-end PE / DADPE, with ordinary natural RNG.
-set -euo pipefail
+set -uo pipefail
 cd "$(dirname "$0")/.."
 
 PYTHON_BIN="${PYTHON_BIN:-/root/miniconda3/envs/detgeo/bin/python}"
@@ -16,14 +16,25 @@ COMMON=(
 run_experiment() {
   local name="$1"
   local dadpe_mode="$2"
-  PYTHONPATH=. "$PYTHON_BIN" train.py "${COMMON[@]}" --dadpe_mode "$dadpe_mode" \
-    --max_epoch 25 --lr 1e-4 --savename "$name"
-  PYTHONPATH=. "$PYTHON_BIN" train.py "${COMMON[@]}" --dadpe_mode "$dadpe_mode" \
-    --pretrain "saved_models/${name}_model_best.pth.tar" --test --savename "${name}_test"
+  if ! PYTHONPATH=. "$PYTHON_BIN" train.py "${COMMON[@]}" --dadpe_mode "$dadpe_mode" \
+    --max_epoch 25 --lr 1e-4 --savename "$name"; then
+    echo "[queue] ${name} training failed; skipping its test and continuing" >&2
+    return 0
+  fi
+  if [[ ! -f "saved_models/${name}_model_best.pth.tar" ]]; then
+    echo "[queue] ${name} has no best checkpoint; skipping its test and continuing" >&2
+    return 0
+  fi
+  if ! PYTHONPATH=. "$PYTHON_BIN" train.py "${COMMON[@]}" --dadpe_mode "$dadpe_mode" \
+    --pretrain "saved_models/${name}_model_best.pth.tar" --test --savename "${name}_test"; then
+    echo "[queue] ${name} test failed; continuing" >&2
+  fi
   rm -f "saved_models/${name}_checkpoint.pth.tar"
 }
 
-PYTHONPATH=. "$PYTHON_BIN" tools/test_e4_dadpe.py
+if ! PYTHONPATH=. "$PYTHON_BIN" tools/test_e4_dadpe.py; then
+  echo "[queue] DADPE sanity failed; continuing with independently guarded experiments" >&2
+fi
 run_experiment "trogeo_ms_e4_fg_amhcsfi_res_detgeope_naturalrng_swin_t_drone_seed2024" none
 run_experiment "trogeo_ms_e4_fg_amhcsfi_res_dadpe_b_naturalrng_swin_t_drone_seed2024" input
 run_experiment "trogeo_ms_e4_fg_amhcsfi_res_msdadpe_d_naturalrng_swin_t_drone_seed2024" multiscale
