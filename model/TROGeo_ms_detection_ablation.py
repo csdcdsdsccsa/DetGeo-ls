@@ -651,11 +651,8 @@ class TROGeoMSDetectionAblation(nn.Module):
         if self.variant in self.MHCSFI_VARIANTS:
             self.mh_cross_scale_interaction = MultiHeadCrossScaleFeatureInteraction(
                 adaptive=self.variant == 'h2_ind_amhcsfi_bi')
-        if self.variant in self.NO_CSFI_GUIDE_VARIANTS:
-            # Match the surviving guidance modules' normal --standard_rng
-            # initialization position to FG/Bi, without registering or using CSFI.
-            _rng_pad_csfi = CrossScaleFeatureInteraction()
-            del _rng_pad_csfi
+        # NoCSFI variants are standalone natural-RNG models: they neither
+        # construct CSFI nor synthesize its RNG consumption.
         if self.variant in self.COARSE_GUIDE_VARIANTS:
             self.coarse_guidance = CoarseGuidance()
         if self.variant in self.FINE_GUIDE_VARIANTS:

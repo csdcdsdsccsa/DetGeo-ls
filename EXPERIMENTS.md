@@ -14,6 +14,20 @@
 | AMH-CSFI-Bi | `h2_ind_amhcsfi_bi` | 21 | 61.21% | 70.10% | 47.96% | 24.92% |
 | MH-CSFI-Bi | `h2_ind_mhcsfi_bi` | 24 | **62.51%** | 70.10% | 48.67% | 24.81% |
 
+### NoCSFI natural-RNG rerun (formal pending results)
+
+- Historical `FG-NoCSFI` / `Bi-NoCSFI` results used a synthetic unregistered
+  `CrossScaleFeatureInteraction` solely as RNG padding. They remain historical
+  records and are not the formal NoCSFI controls below.
+- The natural-RNG rerun starts each model with `--standard_rng --seed 2024` and
+  initializes only modules that actually belong to the model: no CSFI padding,
+  RNG isolation, or RNG restoration. Results are TBD until completion.
+
+| Experiment | Variant | RNG protocol | Validation | Test |
+| --- | --- | --- | --- | --- |
+| FG-NoCSFI natural | `h2_ind_fg_nocsfi` | natural `--standard_rng` | TBD | TBD |
+| Bi-NoCSFI natural | `h2_ind_bi_nocsfi` | natural `--standard_rng` | TBD | TBD |
+
 - Interpretation: `h2_ind_amhcsfi_bi` and `h2_ind_mhcsfi_bi` replace the
   interaction implementation; this table is therefore an ablation record, not
   evidence that either method improves every metric over A3-Bi.

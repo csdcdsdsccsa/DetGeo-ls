@@ -134,6 +134,8 @@ def check_fine_guidance_variants(batch):
     click = torch.rand(batch, 256, 256, device='cuda')
     target = torch.tensor([[256, 256, 512, 512]], dtype=torch.float32, device='cuda').repeat(batch, 1)
     no_csfi_variants = ('h2_ind_fg_nocsfi', 'h2_ind_bi_nocsfi')
+    # NoCSFI variants are standalone natural-RNG models.  They must not
+    # construct/register CSFI or use synthetic RNG padding to imitate it.
     bidir_variants = ('h2_ind_csfi_bi', 'h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi',
                       'h2_ind_amhcsfi_res_bi', 'h2_ind_bi_nocsfi')
     for variant in ('h2_ind_csfi_fg', 'h2_ind_fg_amhcsfi_res') + bidir_variants + no_csfi_variants[:1]:
