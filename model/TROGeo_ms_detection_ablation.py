@@ -13,6 +13,62 @@ from .vit_multistage import TiledViTMultiStageEncoder
 from .habr_former import HABRFormer
 
 
+def build_directional_geometry(distance_map):
+    """Recover click-relative ``[D, X, Y]`` geometry from a DetGeo map."""
+    if distance_map.dim() != 3:
+        raise RuntimeError('distance_map must be [B,H,W], got {}'.format(tuple(distance_map.shape)))
+    batch, height, width = distance_map.shape
+    with torch.no_grad():
+        flat_index = distance_map.reshape(batch, -1).argmax(dim=1)
+        click_y = torch.div(flat_index, width, rounding_mode='floor').to(distance_map.dtype)
+        click_x = (flat_index % width).to(distance_map.dtype)
+        rows = torch.arange(height, device=distance_map.device, dtype=distance_map.dtype).view(1, height, 1)
+        cols = torch.arange(width, device=distance_map.device, dtype=distance_map.dtype).view(1, 1, width)
+        x_map = ((cols - click_x.view(batch, 1, 1)) / float(width)).expand(batch, height, width)
+        y_map = ((rows - click_y.view(batch, 1, 1)) / float(height)).expand(batch, height, width)
+    return torch.stack((distance_map, x_map, y_map), dim=1)
+
+
+class InputDirectionResidual(nn.Module):
+    """Direction-aware residual on top of the unchanged DetGeo input PE."""
+
+    def __init__(self):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(16), nn.GELU(),
+            nn.Conv2d(16, 3, kernel_size=3, stride=1, padding=1, bias=True),
+        )
+        self.gamma = nn.Parameter(torch.tensor(0.0))
+
+    def forward(self, base_feature, geometry):
+        delta = self.encoder(geometry)
+        return base_feature + torch.tanh(self.gamma) * delta, delta
+
+
+class MultiScaleDirectionResidual(nn.Module):
+    """Scale-specific directional residuals before the unchanged Direct-CA."""
+
+    def __init__(self):
+        super().__init__()
+        self.stage3_encoder = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.GroupNorm(8, 32), nn.GELU(), nn.Conv2d(32, 384, kernel_size=1, bias=True),
+        )
+        self.stage4_encoder = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.GroupNorm(8, 32), nn.GELU(), nn.Conv2d(32, 768, kernel_size=1, bias=True),
+        )
+        self.beta3 = nn.Parameter(torch.tensor(0.0))
+        self.beta4 = nn.Parameter(torch.tensor(0.0))
+
+    def forward(self, q3, q4, geometry):
+        g3 = F.interpolate(geometry, size=q3.shape[-2:], mode='bilinear', align_corners=False)
+        g4 = F.interpolate(geometry, size=q4.shape[-2:], mode='bilinear', align_corners=False)
+        p3, p4 = self.stage3_encoder(g3), self.stage4_encoder(g4)
+        return q3 + torch.tanh(self.beta3) * p3, q4 + torch.tanh(self.beta4) * p4, p3, p4
+
+
 def _make_pe_mlp(out_dim):
     return nn.Sequential(nn.Linear(1, 128), nn.GELU(), nn.Linear(128, out_dim))
 
@@ -292,6 +348,20 @@ class FineGuidance(nn.Module):
         return r4_guided, fine_logits, fine_down
 
 
+class HeadQualitySelector(nn.Module):
+    """Predict the more reliable frozen FG-Res detection head."""
+
+    def __init__(self, feature_dim=384):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(feature_dim * 2 + 2, 256), nn.LayerNorm(256), nn.GELU(),
+            nn.Linear(256, 64), nn.GELU(), nn.Linear(64, 2),
+        )
+
+    def forward(self, feat3, feat4, score3, score4):
+        return self.mlp(torch.cat((feat3, feat4, score3[:, None], score4[:, None]), dim=1))
+
+
 class SwinTThreeStageEncoder(nn.Module):
     """Shared Swin-T encoder exposing stage-2, stage-3, and stage-4 feature maps."""
 
@@ -388,16 +458,25 @@ class TROGeoMSDetectionAblation(nn.Module):
                      THREE_SCALE_VARIANTS + TWO_SCALE_QUERY_PE_VARIANTS + TWO_SCALE_PGCA_VARIANTS + \
                      TWO_SCALE_COLLAB_VARIANTS + HABR_VARIANTS + QUERY_REFINE_VARIANTS
 
-    def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current'):
+    def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current', dadpe_mode='none',
+                 enable_hqs=False):
         super().__init__()
         if (emb_size != 768 or backbone not in ('swin_t', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
                 or position_mode not in ('current', 'detgeo')):
             raise ValueError('requires emb_size=768, a supported backbone, and a valid MS variant')
         if backbone in ('vit_t', 'vit_s') and variant != 'h2_ind':
             raise ValueError('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
+        if dadpe_mode not in ('none', 'input', 'multiscale'):
+            raise ValueError('dadpe_mode must be none/input/multiscale')
+        if dadpe_mode != 'none' and (variant != 'h2_ind_csfi_bi' or position_mode != 'detgeo' or backbone != 'swin_t'):
+            raise ValueError('DADPE requires h2_ind_csfi_bi, original DetGeo PE, and Swin-T')
         self.variant = variant
         self.position_mode = position_mode
         self.backbone_name = backbone
+        self.dadpe_mode = dadpe_mode
+        self.enable_hqs = bool(enable_hqs)
+        if self.enable_hqs and variant != 'h2_ind_fg_amhcsfi_res':
+            raise ValueError('HQS-v1 is restricted to h2_ind_fg_amhcsfi_res')
         self.three_scale = variant in self.THREE_SCALE_VARIANTS
         # q2 is exposed only to construct the propagated LE gate; detection
         # remains strictly two-scale for this variant.
@@ -538,6 +617,18 @@ class TROGeoMSDetectionAblation(nn.Module):
             self.pqra_pos_proj4 = _make_pe_mlp(768)
             self.query_refine3 = PositionQueryRefinement(dim=384, heads=6, dim_head=64)
             self.query_refine4 = PositionQueryRefinement(dim=768, heads=12, dim_head=64)
+        # Construct only after A3-Bi, and restore CPU RNG afterwards, so DADPE
+        # cannot perturb shared initialization or later standard-RNG behavior.
+        if self.dadpe_mode != 'none':
+            rng_state = torch.get_rng_state()
+            self.input_direction_residual = InputDirectionResidual()
+            if self.dadpe_mode == 'multiscale':
+                self.multiscale_direction_residual = MultiScaleDirectionResidual()
+            torch.set_rng_state(rng_state)
+        # Standard RNG is deliberately not restored: this experiment follows
+        # the repository-wide --standard_rng protocol.
+        if self.enable_hqs:
+            self.head_quality_selector = HeadQualitySelector(feature_dim=384)
 
     @staticmethod
     def _expect(name, tensor, channels, height, width):
@@ -654,7 +745,12 @@ class TROGeoMSDetectionAblation(nn.Module):
 
     def forward(self, query_imgs, reference_imgs, click_map):
         position_feature = self.position_embedding(torch.cat((query_imgs, click_map.unsqueeze(1)), dim=1))
-        query_input = position_feature
+        geometry = input_dir_delta = dadpe_p3 = dadpe_p4 = None
+        if self.dadpe_mode != 'none':
+            geometry = build_directional_geometry(click_map)
+            query_input, input_dir_delta = self.input_direction_residual(position_feature, geometry)
+        else:
+            query_input = position_feature
         csfi_gate3 = csfi_gate4 = None
         coarse_logits = coarse_up = None
         fine_logits = fine_down = None
@@ -680,6 +776,8 @@ class TROGeoMSDetectionAblation(nn.Module):
         self._expect('query stage4', q4, 768, 8, 8)
         self._expect('satellite stage3', r3, 384, 64, 64)
         self._expect('satellite stage4', r4, 768, 32, 32)
+        if self.dadpe_mode == 'multiscale':
+            q3, q4, dadpe_p3, dadpe_p4 = self.multiscale_direction_residual(q3, q4, geometry)
         if self.variant in self.BIDIR_GUIDE_VARIANTS:
             # Reuse the same CA4 parameters for both passes: first to derive
             # the coarse Stage4 prior, then to refine the final Stage4 map.
@@ -781,6 +879,15 @@ class TROGeoMSDetectionAblation(nn.Module):
             self._expect('H p3', p3, 45, 64, 64)
             self._expect('H p4', p4, 45, 64, 64)
             predictions = {'stage3': p3, 'stage4': p4}
+            if self.enable_hqs:
+                batch_size = p3.shape[0]
+                p3_conf = p3.view(batch_size, 9, 5, 64, 64)[:, :, 4].reshape(batch_size, -1)
+                p4_conf = p4.view(batch_size, 9, 5, 64, 64)[:, :, 4].reshape(batch_size, -1)
+                score3 = torch.softmax(p3_conf, dim=1).max(dim=1).values
+                score4 = torch.softmax(p4_conf, dim=1).max(dim=1).values
+                predictions['hqs_logits'] = self.head_quality_selector(
+                    z3.mean(dim=(2, 3)).detach(), aligned4.mean(dim=(2, 3)).detach(),
+                    score3.detach(), score4.detach())
             if coarse_logits is not None:
                 predictions['coarse_logits'] = coarse_logits
             if fine_logits is not None:
@@ -807,6 +914,14 @@ class TROGeoMSDetectionAblation(nn.Module):
                       tuple(r3.shape), tuple(r4.shape), tuple(z3.shape), tuple(z4.shape), shapes,
                        self.variant in self.CSFI_VARIANTS or self.variant in self.ADAPTIVE_CSFI_VARIANTS or self.variant in self.MHCSFI_VARIANTS,
                        self._position_mode(), self.position_mode), flush=True)
+                if self.dadpe_mode != 'none':
+                    print('[DADPE sanity] mode={} geometry={} gamma={:.6f}'.format(
+                        self.dadpe_mode, tuple(geometry.shape), self.input_direction_residual.gamma.item()), flush=True)
+                if self.dadpe_mode == 'multiscale':
+                    print('[MS-DADPE sanity] p3={} p4={} beta3={:.6f} beta4={:.6f}'.format(
+                        tuple(dadpe_p3.shape), tuple(dadpe_p4.shape),
+                        self.multiscale_direction_residual.beta3.item(),
+                        self.multiscale_direction_residual.beta4.item()), flush=True)
                 if self.variant in self.CSFI_VARIANTS:
                     print('[E4-CSFI sanity] gate3_mean={:.6f} gate4_mean={:.6f} '
                           'alpha3={:.6f} alpha4={:.6f}'.format(

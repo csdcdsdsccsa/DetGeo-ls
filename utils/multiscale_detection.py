@@ -90,6 +90,19 @@ def select_two_heads(pred3, pred4, anchors, image_wh, fusion=False, iou_threshol
     return selected, diagnostics
 
 
+def select_two_heads_hqs(pred3, pred4, hqs_logits, anchors, image_wh):
+    """Select one complete detection head with learned HQS probabilities."""
+    box3, _ = decode_top1(pred3, anchors, image_wh)
+    box4, _ = decode_top1(pred4, anchors, image_wh)
+    quality = torch.softmax(hqs_logits, dim=1)
+    use3 = quality[:, 0] >= quality[:, 1]
+    return torch.where(use3[:, None], box3, box4), {
+        'hqs_stage3_selected': use3.float().mean(),
+        'hqs_stage4_selected': (~use3).float().mean(),
+        'hqs_quality_margin': (quality[:, 0] - quality[:, 1]).abs().mean(),
+    }
+
+
 @torch.no_grad()
 def analyze_two_head_oracle(pred3, pred4, target_bbox, anchors, image_wh):
     """Validation-only GT-oracle upper bound for two-head selection.

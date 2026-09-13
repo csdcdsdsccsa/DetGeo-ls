@@ -9,6 +9,7 @@ import random
 import logging
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
@@ -44,8 +45,8 @@ from model.loss import yolo_loss, build_target, adjust_learning_rate
 from model.multiscale_detection_loss import (multigrid_yolo_loss, two_head_yolo_loss, three_head_yolo_loss,
                                              three_head_yolo_loss_stage2_cls_half, coarse_heatmap_loss,
                                              rccd_consensus_loss)
-from utils.utils import AverageMeter, eval_iou_acc
-from utils.multiscale_detection import (decode_multigrid_top1, decode_top1, select_two_heads, select_three_heads,
+from utils.utils import AverageMeter, eval_iou_acc, bbox_iou
+from utils.multiscale_detection import (decode_multigrid_top1, decode_top1, select_two_heads, select_two_heads_hqs, select_three_heads,
                                         eval_decoded_boxes, analyze_two_head_oracle)
 from utils.checkpoint import save_checkpoint, load_pretrain
 
@@ -181,10 +182,16 @@ def main():
                         help='TROGeo click-position encoder: current double-conv or original DetGeo Conv-BN-Leaky')
     parser.add_argument('--trogeo_click_map_mode', choices=('distance', 'gaussian'), default='distance',
                         help='TROGeo click map: original distance-decay map or fixed Gaussian map')
+    parser.add_argument('--dadpe_mode', choices=('none', 'input', 'multiscale'), default='none',
+                        help='direction-aware DetGeo PE: none=A, input=B, multiscale=D')
     parser.add_argument('--hqs_oracle_diag', action='store_true',
                         help='validation-only Oracle head-selection diagnostic for FG-AMHCSFI-RES')
     parser.add_argument('--hqs_oracle_csv', default='', type=str,
                         help='optional CSV path for per-sample HQS Oracle diagnostics')
+    parser.add_argument('--hqs_v1', action='store_true', help='train a frozen FG-Res Head Quality Selector')
+    parser.add_argument('--hqs_lr', default=1e-3, type=float)
+    parser.add_argument('--hqs_temperature', default=0.15, type=float)
+    parser.add_argument('--hqs_gap_delta', default=0.30, type=float)
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
     parser.add_argument('--sam_multimask_root', default='', help='optional root of split-indexed SAM multi-mask npz files')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
@@ -261,6 +268,15 @@ def main():
         parser.error('--trogeo_ms_det_variant requires --trogeo_backbone swin_t/vit_t/vit_s')
     if args.trogeo_backbone in ('vit_t', 'vit_s') and args.trogeo_ms_det_variant != 'h2_ind':
         parser.error('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
+    if args.dadpe_mode != 'none':
+        if args.trogeo_ms_det_variant != 'h2_ind_csfi_bi':
+            parser.error('--dadpe_mode is restricted to --trogeo_ms_det_variant h2_ind_csfi_bi')
+        if args.trogeo_position_mode != 'detgeo':
+            parser.error('--dadpe_mode requires --trogeo_position_mode detgeo')
+        if args.trogeo_click_map_mode != 'distance':
+            parser.error('--dadpe_mode requires --trogeo_click_map_mode distance')
+        if args.trogeo_backbone != 'swin_t':
+            parser.error('--dadpe_mode currently requires --trogeo_backbone swin_t')
     if args.hqs_oracle_diag:
         if args.trogeo_ms_det_variant != 'h2_ind_fg_amhcsfi_res':
             parser.error('--hqs_oracle_diag is restricted to '
@@ -269,6 +285,15 @@ def main():
             parser.error('--hqs_oracle_diag is validation-only; use --val and do not use --test')
         if args.rccd:
             parser.error('--hqs_oracle_diag must not be combined with RCCD')
+    if args.hqs_v1:
+        if args.trogeo_ms_det_variant != 'h2_ind_fg_amhcsfi_res':
+            parser.error('--hqs_v1 requires --trogeo_ms_det_variant h2_ind_fg_amhcsfi_res')
+        if args.rccd or args.hqs_oracle_diag:
+            parser.error('--hqs_v1 cannot be combined with RCCD or --hqs_oracle_diag')
+        if args.hqs_temperature <= 0 or args.hqs_gap_delta <= 0:
+            parser.error('--hqs_temperature and --hqs_gap_delta must be positive')
+        if not (args.test or args.val) and not (args.pretrain or args.resume):
+            parser.error('HQS-v1 training requires the completed FG-Res checkpoint')
     if args.trogeo_ms_det_variant in ('h3_ind', 'h3_adaptive') and not (args.test or args.val):
         parser.error('H3 variants are inference-only: train h2_ind then evaluate its best checkpoint')
     if not 0.0 <= args.h3_iou_threshold <= 1.0:
@@ -406,7 +431,8 @@ def main():
     elif args.trogeo_ms_det_variant != 'none':
         model = TROGeoMSDetectionAblation(emb_size=args.emb_size, backbone=args.trogeo_backbone,
                                            variant=args.trogeo_ms_det_variant,
-                                           position_mode=args.trogeo_position_mode)
+                                           position_mode=args.trogeo_position_mode,
+                                           dadpe_mode=args.dadpe_mode, enable_hqs=args.hqs_v1)
     elif args.backbone_exp != 'baseline':
         model = DetGeoBackboneAblation(emb_size=args.emb_size, leaky=True, backbone_exp=args.backbone_exp)
     elif args.single_scale_ca:
@@ -446,6 +472,17 @@ def main():
     if args.pretrain:
         model = load_pretrain(model, args, logging)
 
+    if args.hqs_v1:
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        for parameter in model.module.head_quality_selector.parameters():
+            parameter.requires_grad = True
+        trainable_names = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+        if not trainable_names or not all(name.startswith('module.head_quality_selector.') for name in trainable_names):
+            raise RuntimeError('HQS-v1 unexpectedly unfroze FG-Res parameters: {}'.format(trainable_names))
+        print('[HQS-v1] frozen FG-Res; trainable parameters={}'.format(
+            sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)))
+
     if args.freeze_prompt_only:
         if not (args.sam_prompt or args.adaptive_sam_prompt or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae):
             raise ValueError('--freeze_prompt_only requires a prompt mode')
@@ -467,7 +504,9 @@ def main():
     print('Num of parameters:', sum([param.nelement() for param in model.parameters()]))
     logging.info('Num of parameters:%d'%int(sum([param.nelement() for param in model.parameters()])))
 
-    if trogeo_mode:
+    if args.hqs_v1:
+        optimizer = torch.optim.Adam(model.module.head_quality_selector.parameters(), lr=args.hqs_lr, betas=(0.9, 0.999))
+    elif trogeo_mode:
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
     elif args.sam_prompt or args.adaptive_sam_prompt or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae or args.adaptive_gaussian_field:
         prompt_params, base_params = [], []
@@ -526,9 +565,12 @@ def main():
         _ = test_epoch(val_loader, model, args)
     else:
         for epoch in range(start_epoch, args.max_epoch):
-            adjust_learning_rate(args, optimizer, epoch)
             gc.collect()
-            train_epoch(train_loader, model, optimizer, epoch, args)
+            if args.hqs_v1:
+                train_hqs_epoch(train_loader, model, optimizer, epoch, args)
+            else:
+                adjust_learning_rate(args, optimizer, epoch)
+                train_epoch(train_loader, model, optimizer, epoch, args)
             accu_new = test_epoch(val_loader, model, args)
             ## remember best accu and save checkpoint
             is_best = accu_new > best_accu
@@ -663,12 +705,57 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
                                                args.img_size, args.coarse_sigma)
         else:
             loss_geo = loss_cls = None
-        final_box, diagnostics = select_two_heads(
-            p3, p4, anchors_full, args.img_size,
-            fusion=variant in ('h3_ind', 'h3_adaptive'),
-            iou_threshold=args.h3_iou_threshold,
-            adaptive=(variant == 'h3_adaptive'))
+        if args.hqs_v1:
+            final_box, diagnostics = select_two_heads_hqs(
+                p3, p4, predictions['hqs_logits'], anchors_full, args.img_size)
+        else:
+            final_box, diagnostics = select_two_heads(
+                p3, p4, anchors_full, args.img_size,
+                fusion=variant in ('h3_ind', 'h3_adaptive'),
+                iou_threshold=args.h3_iou_threshold,
+                adaptive=(variant == 'h3_adaptive'))
     return loss_geo, loss_cls, loss_aux, final_box, diagnostics
+
+
+def hqs_quality_loss(predictions, ori_gt_bbox, anchors_full, args):
+    p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)
+    p4 = predictions['stage4'].view(predictions['stage4'].shape[0], 9, 5, 64, 64)
+    with torch.no_grad():
+        box3, _ = decode_top1(p3, anchors_full, args.img_size)
+        box4, _ = decode_top1(p4, anchors_full, args.img_size)
+        iou3 = bbox_iou(box3, ori_gt_bbox, x1y1x2y2=True)
+        iou4 = bbox_iou(box4, ori_gt_bbox, x1y1x2y2=True)
+        qualities = torch.stack((iou3, iou4), dim=1)
+        target = torch.softmax(qualities / args.hqs_temperature, dim=1)
+        gap = (iou3 - iou4).abs()
+        weight = torch.clamp(gap / args.hqs_gap_delta, max=1.0)
+        oracle_use3 = iou3 >= iou4
+    per_sample = F.kl_div(F.log_softmax(predictions['hqs_logits'], dim=1), target, reduction='none').sum(dim=1)
+    loss = (weight * per_sample).sum() / weight.sum().clamp_min(1e-6)
+    hqs_use3 = predictions['hqs_logits'][:, 0] >= predictions['hqs_logits'][:, 1]
+    return loss, {'agreement': (hqs_use3 == oracle_use3).float().mean(), 'gap': gap}
+
+
+def train_hqs_epoch(train_loader, model, optimizer, epoch, args):
+    """Keep FG-Res fully frozen/eval; optimize only the selector MLP."""
+    model.eval()
+    model.module.head_quality_selector.train()
+    anchors = np.array([float(x.strip()) for x in args.anchors.split(',')]).reshape(-1, 2)[::-1].copy()
+    anchors = torch.tensor(anchors, dtype=torch.float32).cuda()
+    losses, agreements = AverageMeter(), AverageMeter()
+    for batch_idx, batch in enumerate(train_loader):
+        query, rs, click, bbox, _, prompts = unpack_batch(batch, args)
+        query, rs, click = query.cuda(), rs.cuda(), click.cuda()
+        prompts = tuple(item.cuda() for item in prompts)
+        bbox = torch.clamp(bbox.cuda(), min=0, max=args.img_size - 1)
+        predictions, _ = forward_model(model, query, rs, click, prompts)
+        loss, diag = hqs_quality_loss(predictions, bbox, anchors, args)
+        optimizer.zero_grad(); loss.backward(); optimizer.step()
+        losses.update(loss.item(), query.shape[0]); agreements.update(diag['agreement'].item(), query.shape[0])
+        if batch_idx % args.print_freq == 0:
+            text = '[HQS] Epoch [{}/{}] batch {}/{} Loss {:.5f} OracleAgree {:.4f}'.format(
+                epoch, args.max_epoch, batch_idx, len(train_loader), losses.avg, agreements.avg)
+            print(text); logging.info(text)
 
 
 def train_epoch(train_loader, model, optimizer, epoch, args):
