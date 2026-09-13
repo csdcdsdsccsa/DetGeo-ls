@@ -185,7 +185,7 @@ def main():
     parser.add_argument('--dadpe_mode', choices=('none', 'input', 'multiscale'), default='none',
                         help='direction-aware DetGeo PE: none=A, input=B, multiscale=D')
     parser.add_argument('--hqs_oracle_diag', action='store_true',
-                        help='validation-only Oracle head-selection diagnostic for FG-AMHCSFI-RES')
+                        help='validation-only Oracle head-selection diagnostic for supported AMHCSFI-Res variants')
     parser.add_argument('--hqs_oracle_csv', default='', type=str,
                         help='optional CSV path for per-sample HQS Oracle diagnostics')
     parser.add_argument('--hqs_v1', action='store_true', help='train a frozen FG-Res Head Quality Selector')
@@ -278,9 +278,9 @@ def main():
         if args.trogeo_backbone != 'swin_t':
             parser.error('--dadpe_mode currently requires --trogeo_backbone swin_t')
     if args.hqs_oracle_diag:
-        if args.trogeo_ms_det_variant != 'h2_ind_fg_amhcsfi_res':
+        if args.trogeo_ms_det_variant not in ('h2_ind_fg_amhcsfi_res', 'h2_ind_amhcsfi_res_bi'):
             parser.error('--hqs_oracle_diag is restricted to '
-                         '--trogeo_ms_det_variant h2_ind_fg_amhcsfi_res')
+                         '--trogeo_ms_det_variant h2_ind_fg_amhcsfi_res or h2_ind_amhcsfi_res_bi')
         if not args.val or args.test:
             parser.error('--hqs_oracle_diag is validation-only; use --val and do not use --test')
         if args.rccd:
