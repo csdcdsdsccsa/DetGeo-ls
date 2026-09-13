@@ -362,6 +362,21 @@ class HeadQualitySelector(nn.Module):
         return self.mlp(torch.cat((feat3, feat4, score3[:, None], score4[:, None]), dim=1))
 
 
+class HeadPairwiseRanker(nn.Module):
+    """HQS-v2a: balanced pairwise Head3-vs-Head4 ranker."""
+
+    def __init__(self, feature_dim=384):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(feature_dim * 2 + 2, 256), nn.LayerNorm(256), nn.GELU(),
+            nn.Linear(256, 64), nn.GELU(), nn.Linear(64, 1),
+        )
+
+    def forward(self, feat3, feat4, score3, score4):
+        x = torch.cat((feat3, feat4, score3[:, None], score4[:, None]), dim=1)
+        return self.mlp(x).squeeze(1)
+
+
 class SwinTThreeStageEncoder(nn.Module):
     """Shared Swin-T encoder exposing stage-2, stage-3, and stage-4 feature maps."""
 
@@ -459,7 +474,7 @@ class TROGeoMSDetectionAblation(nn.Module):
                      TWO_SCALE_COLLAB_VARIANTS + HABR_VARIANTS + QUERY_REFINE_VARIANTS
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current', dadpe_mode='none',
-                 enable_hqs=False):
+                 enable_hqs=False, enable_hqs_v2a=False):
         super().__init__()
         if (emb_size != 768 or backbone not in ('swin_t', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
                 or position_mode not in ('current', 'detgeo')):
@@ -475,8 +490,11 @@ class TROGeoMSDetectionAblation(nn.Module):
         self.backbone_name = backbone
         self.dadpe_mode = dadpe_mode
         self.enable_hqs = bool(enable_hqs)
-        if self.enable_hqs and variant != 'h2_ind_fg_amhcsfi_res':
-            raise ValueError('HQS-v1 is restricted to h2_ind_fg_amhcsfi_res')
+        self.enable_hqs_v2a = bool(enable_hqs_v2a)
+        if self.enable_hqs and self.enable_hqs_v2a:
+            raise ValueError('HQS-v1 and HQS-v2a are mutually exclusive')
+        if (self.enable_hqs or self.enable_hqs_v2a) and variant != 'h2_ind_fg_amhcsfi_res':
+            raise ValueError('HQS requires h2_ind_fg_amhcsfi_res')
         self.three_scale = variant in self.THREE_SCALE_VARIANTS
         # q2 is exposed only to construct the propagated LE gate; detection
         # remains strictly two-scale for this variant.
@@ -625,10 +643,18 @@ class TROGeoMSDetectionAblation(nn.Module):
             if self.dadpe_mode == 'multiscale':
                 self.multiscale_direction_residual = MultiScaleDirectionResidual()
             torch.set_rng_state(rng_state)
-        # Standard RNG is deliberately not restored: this experiment follows
-        # the repository-wide --standard_rng protocol.
+        # v1 follows ordinary standard RNG; v2a pads/restores only to reproduce
+        # v1's exact post-construction RNG state for the controlled comparison.
         if self.enable_hqs:
             self.head_quality_selector = HeadQualitySelector(feature_dim=384)
+        if self.enable_hqs_v2a:
+            pre_hqs_rng = torch.get_rng_state()
+            rng_pad_v1 = HeadQualitySelector(feature_dim=384)
+            post_v1_rng = torch.get_rng_state()
+            del rng_pad_v1
+            torch.set_rng_state(pre_hqs_rng)
+            self.head_pairwise_ranker = HeadPairwiseRanker(feature_dim=384)
+            torch.set_rng_state(post_v1_rng)
 
     @staticmethod
     def _expect(name, tensor, channels, height, width):
@@ -879,15 +905,18 @@ class TROGeoMSDetectionAblation(nn.Module):
             self._expect('H p3', p3, 45, 64, 64)
             self._expect('H p4', p4, 45, 64, 64)
             predictions = {'stage3': p3, 'stage4': p4}
-            if self.enable_hqs:
+            if self.enable_hqs or self.enable_hqs_v2a:
                 batch_size = p3.shape[0]
                 p3_conf = p3.view(batch_size, 9, 5, 64, 64)[:, :, 4].reshape(batch_size, -1)
                 p4_conf = p4.view(batch_size, 9, 5, 64, 64)[:, :, 4].reshape(batch_size, -1)
                 score3 = torch.softmax(p3_conf, dim=1).max(dim=1).values
                 score4 = torch.softmax(p4_conf, dim=1).max(dim=1).values
-                predictions['hqs_logits'] = self.head_quality_selector(
-                    z3.mean(dim=(2, 3)).detach(), aligned4.mean(dim=(2, 3)).detach(),
-                    score3.detach(), score4.detach())
+                feat3, feat4 = z3.mean(dim=(2, 3)).detach(), aligned4.mean(dim=(2, 3)).detach()
+                score3, score4 = score3.detach(), score4.detach()
+                if self.enable_hqs:
+                    predictions['hqs_logits'] = self.head_quality_selector(feat3, feat4, score3, score4)
+                else:
+                    predictions['hqs_rank_logit'] = self.head_pairwise_ranker(feat3, feat4, score3, score4)
             if coarse_logits is not None:
                 predictions['coarse_logits'] = coarse_logits
             if fine_logits is not None:
