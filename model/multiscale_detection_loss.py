@@ -62,6 +62,65 @@ def two_head_yolo_loss(pred3, pred4, ori_gt_bboxes, anchors_full, image_wh):
     return 0.5 * (geo3 + geo4), 0.5 * (cls3 + cls4)
 
 
+def decode_positive_box(predictions, anchors_full, best_anchor_gi_gj, image_wh):
+    """Differentiably decode each GT-matched positive candidate to xyxy pixels."""
+    if predictions.ndim != 5 or predictions.shape[2] != 5:
+        raise ValueError('decode_positive_box expects [B,A,5,H,W], got {}'.format(tuple(predictions.shape)))
+    grid_h, grid_w = predictions.shape[-2:]
+    if grid_h != grid_w:
+        raise ValueError('decode_positive_box requires a square grid, got {}x{}'.format(grid_h, grid_w))
+    batch_size = predictions.shape[0]
+    best_anchor = best_anchor_gi_gj[:, 0].long()
+    gi, gj = best_anchor_gi_gj[:, 1].long(), best_anchor_gi_gj[:, 2].long()
+    batch_idx = torch.arange(batch_size, device=predictions.device)
+    selected = predictions[batch_idx, best_anchor, :, gj, gi]
+    stride = float(image_wh) / float(grid_w)
+    dtype = selected.dtype
+    center = (selected[:, :2].sigmoid() + torch.stack((gi, gj), dim=1).to(dtype)) * stride
+    anchor_wh = anchors_full.to(device=predictions.device, dtype=dtype)[best_anchor]
+    wh = torch.exp(selected[:, 2:4]) * anchor_wh
+    return torch.cat((center - 0.5 * wh, center + 0.5 * wh), dim=1)
+
+
+def positive_box_iou(predictions, ori_gt_bboxes, anchors_full, best_anchor_gi_gj, image_wh, eps=1e-16):
+    """Differentiable IoU between every positive candidate and its GT box."""
+    pred_box = decode_positive_box(predictions, anchors_full, best_anchor_gi_gj, image_wh)
+    gt_box = ori_gt_bboxes.to(device=pred_box.device, dtype=pred_box.dtype)
+    top_left = torch.maximum(pred_box[:, :2], gt_box[:, :2])
+    bottom_right = torch.minimum(pred_box[:, 2:], gt_box[:, 2:])
+    inter = (bottom_right - top_left).clamp_min(0.0).prod(dim=1)
+    pred_area = (pred_box[:, 2:] - pred_box[:, :2]).clamp_min(0.0).prod(dim=1)
+    gt_area = (gt_box[:, 2:] - gt_box[:, :2]).clamp_min(0.0).prod(dim=1)
+    return (inter / (pred_area + gt_area - inter + eps)).clamp(0.0, 1.0)
+
+
+def threshold_aware_iou_loss(iou, temperature=0.05, weight25=0.5, weight50=1.0):
+    """Smooth losses targeted at the Acc@0.25 and Acc@0.50 thresholds."""
+    if temperature <= 0.0:
+        raise ValueError('threshold temperature must be > 0')
+    if weight25 < 0.0 or weight50 < 0.0:
+        raise ValueError('threshold weights must be >= 0')
+    loss25 = temperature * F.softplus((0.25 - iou) / temperature)
+    loss50 = temperature * F.softplus((0.50 - iou) / temperature)
+    return (weight25 * loss25 + weight50 * loss50).mean()
+
+
+def two_head_yolo_threshold_reg_loss(pred3, pred4, ori_gt_bboxes, anchors_full, image_wh,
+                                     reg_weight=0.2, temperature=0.05, weight25=0.5, weight50=1.0):
+    """Unchanged two-head YOLO loss plus a positive-candidate threshold regularizer."""
+    if reg_weight < 0.0:
+        raise ValueError('reg_weight must be >= 0')
+    target, best = build_target(ori_gt_bboxes, anchors_full, image_wh, 64)
+    geo3_mse, cls3 = yolo_loss(pred3, target, anchors_full, best, image_wh)
+    geo4_mse, cls4 = yolo_loss(pred4, target, anchors_full, best, image_wh)
+    iou3 = positive_box_iou(pred3, ori_gt_bboxes, anchors_full, best, image_wh)
+    iou4 = positive_box_iou(pred4, ori_gt_bboxes, anchors_full, best, image_wh)
+    reg3 = threshold_aware_iou_loss(iou3, temperature, weight25, weight50)
+    reg4 = threshold_aware_iou_loss(iou4, temperature, weight25, weight50)
+    loss_geo = 0.5 * ((geo3_mse + reg_weight * reg3) + (geo4_mse + reg_weight * reg4))
+    return loss_geo, 0.5 * (cls3 + cls4)
+
+
 def three_head_yolo_loss(pred2, pred3, pred4, ori_gt_bboxes, anchors_full, image_wh):
     """E7: every independent 9-anchor head receives the same 64x64 target."""
     target, best = build_target(ori_gt_bboxes, anchors_full, image_wh, 64)

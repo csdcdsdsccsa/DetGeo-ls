@@ -45,7 +45,7 @@ from model.TROGeo_ms_detection_ablation import TROGeoMSDetectionAblation
 from model.loss import yolo_loss, build_target, adjust_learning_rate
 from model.multiscale_detection_loss import (multigrid_yolo_loss, two_head_yolo_loss, three_head_yolo_loss,
                                              three_head_yolo_loss_stage2_cls_half, coarse_heatmap_loss,
-                                             rccd_consensus_loss)
+                                             rccd_consensus_loss, two_head_yolo_threshold_reg_loss)
 from utils.utils import AverageMeter, eval_iou_acc, bbox_iou
 from utils.multiscale_detection import (decode_multigrid_top1, decode_top1, select_two_heads, select_two_heads_hqs,
                                         select_two_heads_hqs_v2a, select_three_heads,
@@ -168,6 +168,16 @@ def main():
                         help='Gaussian sigma in cells for E4 Stage4 coarse heatmap supervision')
     parser.add_argument('--fine_sigma', default=3.0, type=float,
                         help='Gaussian sigma in Stage3 64x64 cells for fine-guidance supervision')
+    parser.add_argument('--bbox_threshold_reg', action='store_true',
+                        help='enable Acc@0.25/0.50-oriented positive-box threshold regularization')
+    parser.add_argument('--bbox_threshold_reg_weight', default=0.2, type=float,
+                        help='overall threshold-regularization weight')
+    parser.add_argument('--bbox_threshold_temperature', default=0.05, type=float,
+                        help='soft IoU-threshold temperature')
+    parser.add_argument('--bbox_threshold_weight25', default=0.5, type=float,
+                        help='relative IoU=0.25 threshold weight')
+    parser.add_argument('--bbox_threshold_weight50', default=1.0, type=float,
+                        help='relative IoU=0.50 threshold weight')
     parser.add_argument('--rccd', action='store_true',
                         help='training-only reliability-aware confidence consensus for h2_ind_csfi_bi')
     parser.add_argument('--rccd_weight', default=0.1, type=float, help='maximum RCCD loss weight')
@@ -307,6 +317,19 @@ def main():
             parser.error('--amr_pe_mode currently requires --trogeo_backbone swin_t')
         if args.dadpe_mode != 'none':
             parser.error('--amr_pe_mode requires --dadpe_mode none for a front-end-only ablation')
+    if args.bbox_threshold_reg:
+        if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
+            parser.error('--bbox_threshold_reg is restricted to Bi-Res h2_ind_amhcsfi_res_bi')
+        if args.trogeo_backbone != 'swin_t' or args.trogeo_position_mode != 'detgeo':
+            parser.error('--bbox_threshold_reg requires Swin-T and original DetGeo PE')
+        if args.trogeo_click_map_mode != 'distance' or args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
+            parser.error('--bbox_threshold_reg requires distance map, dadpe_mode=none, and amr_pe_mode=none')
+        if args.rccd:
+            parser.error('--bbox_threshold_reg must not be combined with RCCD')
+        if args.bbox_threshold_reg_weight < 0.0 or args.bbox_threshold_weight25 < 0.0 or args.bbox_threshold_weight50 < 0.0:
+            parser.error('threshold-regularization weights must be >= 0')
+        if args.bbox_threshold_temperature <= 0.0:
+            parser.error('--bbox_threshold_temperature must be > 0')
     if args.hqs_oracle_diag:
         if args.trogeo_ms_det_variant not in ('h2_ind_fg_amhcsfi_res', 'h2_ind_amhcsfi_res_bi'):
             parser.error('--hqs_oracle_diag is restricted to '
@@ -797,7 +820,15 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
         p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)
         p4 = predictions['stage4'].view(predictions['stage4'].shape[0], 9, 5, 64, 64)
         if include_loss:
-            loss_geo, loss_cls = two_head_yolo_loss(p3, p4, ori_gt_bbox, anchors_full, args.img_size)
+            if args.bbox_threshold_reg:
+                loss_geo, loss_cls = two_head_yolo_threshold_reg_loss(
+                    p3, p4, ori_gt_bbox, anchors_full, args.img_size,
+                    reg_weight=args.bbox_threshold_reg_weight,
+                    temperature=args.bbox_threshold_temperature,
+                    weight25=args.bbox_threshold_weight25,
+                    weight50=args.bbox_threshold_weight50)
+            else:
+                loss_geo, loss_cls = two_head_yolo_loss(p3, p4, ori_gt_bbox, anchors_full, args.img_size)
             if variant in habr_prior_variants:
                 loss_prior3 = coarse_heatmap_loss(predictions['habr_prior3_logits'], ori_gt_bbox,
                                                    args.img_size, args.fine_sigma)
