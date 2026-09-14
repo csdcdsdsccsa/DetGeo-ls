@@ -28,7 +28,7 @@
 | FG-NoCSFI natural | `h2_ind_fg_nocsfi` | natural `--standard_rng` | TBD | TBD |
 | Bi-NoCSFI natural | `h2_ind_bi_nocsfi` | natural `--standard_rng` | TBD | TBD |
 
-### Bi-Res DADPE natural-RNG sequence (results pending)
+### Bi-Res DetGeo PE / DADPE natural-RNG sequence (results pending)
 
 Both runs retain the complete `h2_ind_amhcsfi_res_bi` Bi-Res path: shared
 Stage4 Direct-CA is used both before coarse guidance and after fine guidance,
@@ -36,6 +36,7 @@ then AMHCSFI-Res updates the two maps before the unchanged dual detector heads.
 
 | Experiment | Variant | Position front end | DADPE mode | RNG protocol | Validation | Test |
 | --- | --- | --- | --- | --- | --- | --- |
+| Bi-Res + DetGeo-PE | `h2_ind_amhcsfi_res_bi` | DetGeo PE + distance | `none` | natural `--standard_rng` | TBD | TBD |
 | Bi-Res + DADPE-B | `h2_ind_amhcsfi_res_bi` | DetGeo PE + distance | `input` | natural `--standard_rng` | TBD | TBD |
 | Bi-Res + MS-DADPE-D | `h2_ind_amhcsfi_res_bi` | DetGeo PE + distance | `multiscale` | natural `--standard_rng` | TBD | TBD |
 
