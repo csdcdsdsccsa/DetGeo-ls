@@ -155,6 +155,7 @@ def main():
         'h2_ind_csfi', 'h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier',
         'h2_ind_cg_habr_prior',
         'h2_ind_csfi_fg', 'h2_ind_csfi_bi', 'h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi', 'h2_ind_amhcsfi_res_bi',
+        'h2_ind_amhcsfi_res_bi_afuse',
         'h2_ind_cg_amhcsfi_res', 'h2_ind_fg_amhcsfi_res',
         'h2_ind_fg_amhcsfi_res_s3', 'h2_ind_fg_amhcsfi_res_s4', 'h2_ind_fg_amhcsfi_res_afuse',
         'h2_ind_fg_nocsfi', 'h2_ind_bi_nocsfi',
@@ -754,6 +755,7 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
     habr_prior_variants = ('h2_ind_habr_prior', 'h2_ind_habr_adapt', 'h2_ind_habr')
     fg_amhcsfi_single_variants = (
         'h2_ind_fg_amhcsfi_res_s3', 'h2_ind_fg_amhcsfi_res_s4', 'h2_ind_fg_amhcsfi_res_afuse')
+    bi_amhcsfi_single_variants = ('h2_ind_amhcsfi_res_bi_afuse',)
     loss_aux = None
     three_scale_variants = (
         'h2_ind_3scale', 'h2_ind_3scale_stage2cls05', 'h2_ind_3scale_pe_ln_amp',
@@ -805,6 +807,23 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
         if 'fusion_weights' in predictions:
             diagnostics['fusion_w3'] = predictions['fusion_weights'][:, 0].mean()
             diagnostics['fusion_w4'] = predictions['fusion_weights'][:, 1].mean()
+    elif variant in bi_amhcsfi_single_variants:
+        p = predictions['single'].view(predictions['single'].shape[0], 9, 5, 64, 64)
+        target, best = build_target(ori_gt_bbox, anchors_full, args.img_size, 64)
+        if include_loss:
+            loss_geo, loss_cls = yolo_loss(p, target, anchors_full, best, args.img_size)
+            loss_coarse = coarse_heatmap_loss(predictions['coarse_logits'], ori_gt_bbox,
+                                              args.img_size, args.coarse_sigma)
+            loss_fine = coarse_heatmap_loss(predictions['fine_logits'], ori_gt_bbox,
+                                            args.img_size, args.fine_sigma)
+            loss_aux = 0.5 * (loss_coarse + loss_fine)
+        else:
+            loss_geo = loss_cls = None
+        final_box, _ = decode_top1(p, anchors_full, args.img_size)
+        diagnostics = {
+            'fusion_w3': predictions['fusion_weights'][:, 0].mean(),
+            'fusion_w4': predictions['fusion_weights'][:, 1].mean(),
+        }
     elif variant == 'h2_ind_hier':
         p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)
         target, best = build_target(ori_gt_bbox, anchors_full, args.img_size, 64)
