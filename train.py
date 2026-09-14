@@ -49,7 +49,8 @@ from model.multiscale_detection_loss import (multigrid_yolo_loss, two_head_yolo_
 from utils.utils import AverageMeter, eval_iou_acc, bbox_iou
 from utils.multiscale_detection import (decode_multigrid_top1, decode_top1, select_two_heads, select_two_heads_hqs,
                                         select_two_heads_hqs_v2a, select_three_heads,
-                                        eval_decoded_boxes, analyze_two_head_oracle)
+                                        eval_decoded_boxes, analyze_two_head_oracle, build_qcc_state,
+                                        select_qcc_a, select_qcc_ranked)
 from utils.checkpoint import save_checkpoint, load_pretrain
 
 
@@ -156,6 +157,8 @@ def main():
         'h2_ind_cg_habr_prior',
         'h2_ind_csfi_fg', 'h2_ind_csfi_bi', 'h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi', 'h2_ind_amhcsfi_res_bi',
         'h2_ind_amhcsfi_res_bi_afuse',
+        'h2_ind_amhcsfi_res_bi_qcc_a', 'h2_ind_amhcsfi_res_bi_qcc_b',
+        'h2_ind_amhcsfi_res_bi_qcc_full',
         'h2_ind_cg_amhcsfi_res', 'h2_ind_fg_amhcsfi_res',
         'h2_ind_fg_amhcsfi_res_s3', 'h2_ind_fg_amhcsfi_res_s4', 'h2_ind_fg_amhcsfi_res_afuse',
         'h2_ind_fg_nocsfi', 'h2_ind_bi_nocsfi',
@@ -169,6 +172,14 @@ def main():
                         help='Gaussian sigma in cells for E4 Stage4 coarse heatmap supervision')
     parser.add_argument('--fine_sigma', default=3.0, type=float,
                         help='Gaussian sigma in Stage3 64x64 cells for fine-guidance supervision')
+    parser.add_argument('--qcc_quality_weight', default=0.2, type=float,
+                        help='QCC localization-quality loss weight')
+    parser.add_argument('--qcc_rank_weight', default=0.1, type=float,
+                        help='QCC detached pairwise-ranker loss weight')
+    parser.add_argument('--qcc_rank_epsilon', default=0.03, type=float,
+                        help='QCC ignore band for the two heads GT-IoU gap')
+    parser.add_argument('--qcc_fusion_iou', default=0.5, type=float,
+                        help='QCC-Full predicted-box agreement IoU threshold')
     parser.add_argument('--bbox_threshold_reg', action='store_true',
                         help='enable Acc@0.25/0.50-oriented positive-box threshold regularization')
     parser.add_argument('--bbox_threshold_reg_weight', default=0.2, type=float,
@@ -756,7 +767,11 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
     fg_amhcsfi_single_variants = (
         'h2_ind_fg_amhcsfi_res_s3', 'h2_ind_fg_amhcsfi_res_s4', 'h2_ind_fg_amhcsfi_res_afuse')
     bi_amhcsfi_single_variants = ('h2_ind_amhcsfi_res_bi_afuse',)
+    qcc_a_variants = ('h2_ind_amhcsfi_res_bi_qcc_a',)
+    qcc_rank_variants = ('h2_ind_amhcsfi_res_bi_qcc_b', 'h2_ind_amhcsfi_res_bi_qcc_full')
+    qcc_variants = qcc_a_variants + qcc_rank_variants
     loss_aux = None
+    qcc_losses = None
     three_scale_variants = (
         'h2_ind_3scale', 'h2_ind_3scale_stage2cls05', 'h2_ind_3scale_pe_ln_amp',
         'h2_ind_3scale_pe_all_add', 'h2_ind_3scale_pe_all_key', 'h2_ind_3scale_le_ind_res',
@@ -824,6 +839,36 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
             'fusion_w3': predictions['fusion_weights'][:, 0].mean(),
             'fusion_w4': predictions['fusion_weights'][:, 1].mean(),
         }
+    elif variant in qcc_variants:
+        p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)
+        p4 = predictions['stage4'].view(predictions['stage4'].shape[0], 9, 5, 64, 64)
+        if include_loss:
+            loss_geo, loss_cls = two_head_yolo_loss(p3, p4, ori_gt_bbox, anchors_full, args.img_size)
+            loss_coarse = coarse_heatmap_loss(predictions['coarse_logits'], ori_gt_bbox,
+                                              args.img_size, args.coarse_sigma)
+            loss_fine = coarse_heatmap_loss(predictions['fine_logits'], ori_gt_bbox,
+                                            args.img_size, args.fine_sigma)
+            loss_aux = 0.5 * (loss_coarse + loss_fine)
+        else:
+            loss_geo = loss_cls = None
+        state = build_qcc_state(p3, p4, predictions['qcc_quality3'], predictions['qcc_quality4'],
+                                anchors_full, args.img_size)
+        if variant in qcc_a_variants:
+            final_box, diagnostics = select_qcc_a(state)
+        else:
+            if 'qcc_rank_logit' not in predictions:
+                raise RuntimeError('QCC-B/Full requires detached qcc_rank_logit before decoding')
+            final_box, diagnostics = select_qcc_ranked(
+                state, predictions['qcc_rank_logit'],
+                fusion_iou=args.qcc_fusion_iou if variant == 'h2_ind_amhcsfi_res_bi_qcc_full' else None)
+        if include_loss:
+            quality_loss, iou3, iou4 = qcc_quality_loss(state, ori_gt_bbox)
+            rank_loss = None
+            if variant in qcc_rank_variants:
+                rank_loss, rank_diag = qcc_pairwise_ranking_loss(
+                    predictions['qcc_rank_logit'], iou3, iou4, args.qcc_rank_epsilon)
+                diagnostics['qcc_rank_valid_ratio'] = rank_diag['valid_ratio']
+            qcc_losses = {'quality': quality_loss, 'rank': rank_loss}
     elif variant == 'h2_ind_hier':
         p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)
         target, best = build_target(ori_gt_bbox, anchors_full, args.img_size, 64)
@@ -882,7 +927,7 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
                 fusion=variant in ('h3_ind', 'h3_adaptive'),
                 iou_threshold=args.h3_iou_threshold,
                 adaptive=(variant == 'h3_adaptive'))
-    return loss_geo, loss_cls, loss_aux, final_box, diagnostics
+    return loss_geo, loss_cls, loss_aux, qcc_losses, final_box, diagnostics
 
 
 def hqs_quality_loss(predictions, ori_gt_bbox, anchors_full, args):
@@ -936,6 +981,43 @@ def attach_hqs_v2b_rank_logit(model, predictions, anchors_full, args):
     predictions['hqs_rank_logit'] = model.module.head_prediction_quality_ranker(
         predictions['hqs_feat3'].detach(), predictions['hqs_feat4'].detach(), quality_stats.detach())
     return diagnostics
+
+
+def attach_qcc_rank_logit(model, predictions, anchors_full, args):
+    """QCC ranker receives only detached anchor-aware prediction state."""
+    p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)
+    p4 = predictions['stage4'].view(predictions['stage4'].shape[0], 9, 5, 64, 64)
+    state = build_qcc_state(p3, p4, predictions['qcc_quality3'], predictions['qcc_quality4'],
+                            anchors_full, args.img_size)
+    predictions['qcc_rank_logit'] = model.module.qcc_ranker(state['rank_input'].detach())
+
+
+def qcc_quality_loss(state, gt_bbox):
+    """Train quality heads against detached Top-1 localization IoU targets."""
+    with torch.no_grad():
+        iou3 = bbox_iou(state['box3'].detach(), gt_bbox, x1y1x2y2=True).clamp(0.0, 1.0)
+        iou4 = bbox_iou(state['box4'].detach(), gt_bbox, x1y1x2y2=True).clamp(0.0, 1.0)
+    loss = 0.5 * (F.smooth_l1_loss(state['quality3'], iou3) + F.smooth_l1_loss(state['quality4'], iou4))
+    return loss, iou3, iou4
+
+
+def qcc_pairwise_ranking_loss(rank_logit, iou3, iou4, epsilon):
+    """Balanced BCE only where one QCC head has a clear GT-IoU advantage."""
+    gap = iou3.detach() - iou4.detach()
+    valid = gap.abs() > float(epsilon)
+    if not bool(valid.any()):
+        return rank_logit.sum() * 0.0, {'valid_ratio': valid.float().mean()}
+    target = (gap[valid] > 0).float()
+    per_sample = F.binary_cross_entropy_with_logits(rank_logit[valid], target, reduction='none')
+    mask3, mask4 = target.eq(1.0), target.eq(0.0)
+    if bool(mask3.any()) and bool(mask4.any()):
+        weights = torch.zeros_like(per_sample)
+        weights[mask3] = 0.5 / mask3.sum()
+        weights[mask4] = 0.5 / mask4.sum()
+        loss = (weights * per_sample).sum()
+    else:
+        loss = per_sample.mean()
+    return loss, {'valid_ratio': valid.float().mean()}
 
 
 def hqs_pairwise_ranking_loss(predictions, ori_gt_bbox, anchors_full, args):
@@ -1130,8 +1212,12 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
         loss_rccd = None
         rccd_diagnostics = None
         current_rccd_weight = 0.0
+        qcc_losses = None
         if is_ms_detection_variant(args):
-            loss_geo, loss_cls, loss_aux, final_box, _ = _ms_predictions_and_loss(
+            if args.trogeo_ms_det_variant in ('h2_ind_amhcsfi_res_bi_qcc_b',
+                                               'h2_ind_amhcsfi_res_bi_qcc_full'):
+                attach_qcc_rank_logit(model, prediction_output, anchors_full, args)
+            loss_geo, loss_cls, loss_aux, qcc_losses, final_box, _ = _ms_predictions_and_loss(
                 prediction_output, ori_gt_bbox, anchors_full, args, include_loss=True)
             accu, _, iou, accu_center = eval_decoded_boxes(final_box, ori_gt_bbox, args.img_size)
             if args.rccd:
@@ -1153,6 +1239,10 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
         loss = loss_cls + loss_geo * args.beta
         if loss_aux is not None:
             loss = loss + args.coarse_loss_weight * loss_aux
+        if qcc_losses is not None:
+            loss = loss + args.qcc_quality_weight * qcc_losses['quality']
+            if qcc_losses['rank'] is not None:
+                loss = loss + args.qcc_rank_weight * qcc_losses['rank']
         if loss_rccd is not None:
             loss = loss + current_rccd_weight * loss_rccd
 
@@ -1272,8 +1362,11 @@ def test_epoch(data_loader, model, args):
             prediction_output, attn_score = forward_model(model, query_imgs, rs_imgs, mat_clickxy, prompt_maps)
             if args.hqs_v2b:
                 attach_hqs_v2b_rank_logit(model, prediction_output, anchors_full, args)
+            if args.trogeo_ms_det_variant in ('h2_ind_amhcsfi_res_bi_qcc_b',
+                                               'h2_ind_amhcsfi_res_bi_qcc_full'):
+                attach_qcc_rank_logit(model, prediction_output, anchors_full, args)
             if is_ms_detection_variant(args):
-                _, _, _, final_box, diagnostics = _ms_predictions_and_loss(
+                _, _, _, _, final_box, diagnostics = _ms_predictions_and_loss(
                     prediction_output, ori_gt_bbox, anchors_full, args, include_loss=False)
                 accu50, accu25, iou, accu_center = eval_decoded_boxes(final_box, ori_gt_bbox, args.img_size)
                 accu_list = [accu50, accu25]

@@ -331,6 +331,24 @@ class AdaptiveStage34Fusion(nn.Module):
         return fused, weights
 
 
+class QCCHeadRanker(nn.Module):
+    """Detached prediction-state ranker used by Bi-Res QCC variants."""
+
+    def __init__(self):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(9, 32), nn.LayerNorm(32), nn.GELU(),
+            nn.Linear(32, 16), nn.GELU(), nn.Linear(16, 1),
+        )
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(self, stats):
+        if stats.ndim != 2 or stats.shape[1] != 9:
+            raise RuntimeError('QCC rank stats must be [B,9], got {}'.format(tuple(stats.shape)))
+        return self.mlp(stats).squeeze(1)
+
+
 class AdaptiveCSFIReliability(nn.Module):
     """Optional channel and sample-adaptive directional reliability for CSFI."""
 
@@ -524,7 +542,11 @@ class TROGeoMSDetectionAblation(nn.Module):
         'h2_ind_csfi_fg', 'h2_ind_csfi_bi')
     ADAPTIVE_CSFI_VARIANTS = ('h2_ind_csfi_cg_channel', 'h2_ind_csfi_cg_dir', 'h2_ind_csfi_cg_ar')
     MHCSFI_VARIANTS = ('h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi')
-    AMHCSFI_RES_BI_VARIANTS = ('h2_ind_amhcsfi_res_bi',)
+    QCC_A_VARIANTS = ('h2_ind_amhcsfi_res_bi_qcc_a',)
+    QCC_RANK_VARIANTS = ('h2_ind_amhcsfi_res_bi_qcc_b', 'h2_ind_amhcsfi_res_bi_qcc_full')
+    QCC_FULL_VARIANTS = ('h2_ind_amhcsfi_res_bi_qcc_full',)
+    QCC_VARIANTS = QCC_A_VARIANTS + QCC_RANK_VARIANTS
+    AMHCSFI_RES_BI_VARIANTS = ('h2_ind_amhcsfi_res_bi',) + QCC_VARIANTS
     # Bi-Res keeps its bidirectional guidance and auxiliary heatmap losses;
     # this sibling changes only the final detector from two heads to an
     # adaptive Stage-3/4 fused single head.
@@ -721,6 +743,17 @@ class TROGeoMSDetectionAblation(nn.Module):
         # Must be after every corresponding ordinary-CSFI public module.
         if self.variant in self.AMHCSFI_RES_VARIANTS:
             self.amhcsfi_res_refiner = ResidualAdaptiveMultiReceptiveCSFI()
+        if self.variant in self.QCC_VARIANTS:
+            # Every QCC variant has the identical parameter layout.  QCC-A
+            # simply does not consume the ranker at train/inference time.
+            # Deliberately ordinary --standard_rng: no RNG-state restoration.
+            self.qcc_quality_head_stage3 = nn.Conv2d(384, 9, kernel_size=1)
+            self.qcc_quality_head_stage4 = nn.Conv2d(384, 9, kernel_size=1)
+            self.qcc_ranker = QCCHeadRanker()
+            nn.init.zeros_(self.qcc_quality_head_stage3.weight)
+            nn.init.zeros_(self.qcc_quality_head_stage3.bias)
+            nn.init.zeros_(self.qcc_quality_head_stage4.weight)
+            nn.init.zeros_(self.qcc_quality_head_stage4.bias)
         if self.variant == 'h2_ind_fg_amhcsfi_res_afuse':
             rng_state = torch.get_rng_state()
             self.stage34_adaptive_fusion = AdaptiveStage34Fusion(channels=384, hidden_dim=128)
@@ -1017,6 +1050,13 @@ class TROGeoMSDetectionAblation(nn.Module):
             self._expect('E2 p3', p3, 30, 64, 64)
             self._expect('E2 p4', p4, 15, 32, 32)
             predictions = {'stage3': p3, 'stage4': p4}
+            if self.variant in self.QCC_VARIANTS:
+                q3_logits = self.qcc_quality_head_stage3(z3)
+                q4_logits = self.qcc_quality_head_stage4(aligned4)
+                self._expect('QCC quality3', q3_logits, 9, 64, 64)
+                self._expect('QCC quality4', q4_logits, 9, 64, 64)
+                predictions['qcc_quality3'] = q3_logits
+                predictions['qcc_quality4'] = q4_logits
         elif self.variant in self.FG_AMHCSFI_RES_SINGLE_VARIANTS:
             aligned4 = self.stage4_align(z4)
             fusion_weights = None

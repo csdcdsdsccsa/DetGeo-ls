@@ -4,7 +4,7 @@ import torch
 
 from .utils import bbox_iou, xywh2xyxy
 
-def decode_top1(prediction, anchors, image_wh):
+def decode_top1_with_index(prediction, anchors, image_wh):
     """Decode the highest-confidence candidate in one [B,A,5,G,G] head."""
     batch, _, _, grid, _ = prediction.shape
     flat = prediction[:, :, 4].reshape(batch, -1)
@@ -20,7 +20,69 @@ def decode_top1(prediction, anchors, image_wh):
                       torch.exp(selected[:, 2:4]) * scaled * stride), dim=1)
     box = xywh2xyxy(xywh)
     score = flat.softmax(dim=1).max(dim=1).values
+    return box, score, best
+
+
+def decode_top1(prediction, anchors, image_wh):
+    """Decode the highest-confidence candidate while preserving the old API."""
+    box, score, _ = decode_top1_with_index(prediction, anchors, image_wh)
     return box, score
+
+
+def build_qcc_state(pred3, pred4, quality_logits3, quality_logits4, anchors, image_wh):
+    """Anchor-aware, inference-safe state shared by QCC selection and losses."""
+    box3, score3, index3 = decode_top1_with_index(pred3, anchors, image_wh)
+    box4, score4, index4 = decode_top1_with_index(pred4, anchors, image_wh)
+    batch = pred3.shape[0]
+    q3 = torch.sigmoid(quality_logits3.reshape(batch, -1).gather(1, index3[:, None]).squeeze(1))
+    q4 = torch.sigmoid(quality_logits4.reshape(batch, -1).gather(1, index4[:, None]).squeeze(1))
+    pair_iou = bbox_iou(box3, box4, x1y1x2y2=True).clamp(0.0, 1.0)
+
+    def descriptor(box):
+        cx = 0.5 * (box[:, 0] + box[:, 2]) / float(image_wh)
+        cy = 0.5 * (box[:, 1] + box[:, 3]) / float(image_wh)
+        w = (box[:, 2] - box[:, 0]).clamp_min(0) / float(image_wh)
+        h = (box[:, 3] - box[:, 1]).clamp_min(0) / float(image_wh)
+        return torch.stack((cx, cy, w, h), dim=1)
+
+    rank_input = torch.cat((score3[:, None], score4[:, None], q3[:, None], q4[:, None],
+                            pair_iou[:, None], (descriptor(box3) - descriptor(box4)).abs()), dim=1)
+    if rank_input.shape != (batch, 9):
+        raise RuntimeError('QCC rank input must be [B,9], got {}'.format(tuple(rank_input.shape)))
+    return {'box3': box3, 'box4': box4, 'score3': score3, 'score4': score4,
+            'quality3': q3, 'quality4': q4, 'pair_iou': pair_iou, 'rank_input': rank_input}
+
+
+def select_qcc_a(state):
+    r3, r4 = state['score3'] * state['quality3'], state['score4'] * state['quality4']
+    use3 = r3 >= r4
+    return torch.where(use3[:, None], state['box3'], state['box4']), {
+        'qcc_quality3': state['quality3'].mean(), 'qcc_quality4': state['quality4'].mean(),
+        'qcc_reliability3': r3.mean(), 'qcc_reliability4': r4.mean(),
+        'qcc_head3_ratio': use3.float().mean(), 'qcc_head4_ratio': (~use3).float().mean(),
+        'qcc_pair_iou': state['pair_iou'].mean(), 'qcc_fusion_ratio': use3.new_zeros((), dtype=torch.float),
+    }
+
+
+def select_qcc_ranked(state, rank_logit, fusion_iou=None):
+    p3 = torch.sigmoid(rank_logit)
+    r3 = p3 * state['score3'] * state['quality3']
+    r4 = (1.0 - p3) * state['score4'] * state['quality4']
+    use3 = r3 >= r4
+    winner = torch.where(use3[:, None], state['box3'], state['box4'])
+    if fusion_iou is None:
+        fusion_mask = use3.new_zeros(use3.shape, dtype=torch.bool)
+        selected = winner
+    else:
+        fusion_mask = state['pair_iou'] >= float(fusion_iou)
+        fused = (r3[:, None] * state['box3'] + r4[:, None] * state['box4']) / (r3 + r4).clamp_min(1e-12)[:, None]
+        selected = torch.where(fusion_mask[:, None], fused, winner)
+    return selected, {
+        'qcc_quality3': state['quality3'].mean(), 'qcc_quality4': state['quality4'].mean(),
+        'qcc_rank_probability3': p3.mean(), 'qcc_reliability3': r3.mean(), 'qcc_reliability4': r4.mean(),
+        'qcc_head3_ratio': use3.float().mean(), 'qcc_head4_ratio': (~use3).float().mean(),
+        'qcc_pair_iou': state['pair_iou'].mean(), 'qcc_fusion_ratio': fusion_mask.float().mean(),
+    }
 
 
 def _decode_flat(prediction, anchors, flat_index, image_wh):

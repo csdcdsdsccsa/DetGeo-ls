@@ -496,3 +496,26 @@ there is no RNG padding, save/restore, post-construction reseed, or
 cross-model initialization matching. The three runs use batch 7, workers 24,
 Swin-T, 25 epochs and `lr=1e-4`; each validation-best checkpoint is tested
 once. Results: pending.
+
+# Bi-Res DetGeo-PE QCC output-decision ablation
+
+`h2_ind_amhcsfi_res_bi_qcc_a`, `_qcc_b`, and `_qcc_full` preserve the complete
+Bi-Res + original DetGeo-PE architecture: shared Swin-T, Direct-CA, bidirectional
+coarse/fine guidance, AMHCSFI-Res, two independent 45-channel YOLO heads,
+anchors, detector loss, and auxiliary heatmap losses. They only add two separate
+9-channel Top-1 localization-quality heads and an identically initialized
+9-dimensional ranker. All three construct the same QCC modules under ordinary
+`--standard_rng`; QCC-A simply does not consume the ranker.
+
+- **QCC-A:** confidence times localization quality competition, `C*Q`.
+- **QCC-B:** detached pairwise ranker times confidence and quality, `P*C*Q`.
+- **QCC-Full:** QCC-B plus reliability-weighted box fusion only when the two
+  predicted Top-1 boxes have IoU at least 0.5.
+
+Quality targets are detached predicted-box/GT IoUs. Rank targets are the head
+with higher detached GT IoU; gaps no larger than 0.03 are ignored and rank BCE
+is class-balanced when both winners occur in a batch. Initial Q/P values are
+exactly 0.5, making QCC-A/B reproduce confidence competition at initialization.
+Run order is QCC-A -> QCC-B -> QCC-Full, each with batch 7, workers 24,
+seed 2024, 25 epochs, validation-best checkpoint, then one test evaluation.
+Results: TBD.
