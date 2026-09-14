@@ -29,6 +29,52 @@ def build_directional_geometry(distance_map):
     return torch.stack((distance_map, x_map, y_map), dim=1)
 
 
+class AdaptiveMultiRangePositionField(nn.Module):
+    """Refine a DetGeo distance field with fixed or query-adaptive ranges.
+
+    This module is deliberately limited to the fourth input channel of the
+    original DetGeo position encoder.  It never replaces the click map used by
+    downstream geometry-aware code.
+    """
+
+    def __init__(self, mode='adaptive'):
+        super().__init__()
+        if mode not in ('fixed', 'adaptive'):
+            raise ValueError('AMR-PE mode must be fixed or adaptive')
+        self.mode = mode
+        # Both modes instantiate exactly the same parameter layout.  Fixed mode
+        # simply does not use the predictor in forward, making fixed/adaptive a
+        # clean comparison under ordinary standard RNG.
+        self.content_encoder = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=5, stride=4, padding=2, bias=False),
+            nn.GroupNorm(4, 16), nn.GELU(),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.GroupNorm(8, 32), nn.GELU(),
+            nn.AdaptiveAvgPool2d(1),
+        )
+        self.weight_predictor = nn.Sequential(
+            nn.Flatten(), nn.Linear(32, 16), nn.GELU(), nn.Linear(16, 3),
+        )
+        nn.init.zeros_(self.weight_predictor[-1].weight)
+        nn.init.zeros_(self.weight_predictor[-1].bias)
+        self.gamma = nn.Parameter(torch.tensor(0.0))
+
+    def forward(self, query_imgs, distance_map):
+        if distance_map.dim() != 3:
+            raise RuntimeError('AMR-PE distance_map must be [B,H,W], got {}'.format(
+                tuple(distance_map.shape)))
+        d = distance_map.clamp(min=0.0, max=1.0)
+        fields = torch.stack((d.square(), d, torch.sqrt(d.clamp_min(1e-6))), dim=1)
+        batch_size = d.shape[0]
+        if self.mode == 'fixed':
+            weights = d.new_full((batch_size, 3), 1.0 / 3.0)
+        else:
+            weights = torch.softmax(self.weight_predictor(self.content_encoder(query_imgs)), dim=1)
+        d_multi = (fields * weights[:, :, None, None]).sum(dim=1)
+        alpha = torch.tanh(self.gamma)
+        return d + alpha * (d_multi - d), weights, d_multi, alpha
+
+
 class InputDirectionResidual(nn.Module):
     """Direction-aware residual on top of the unchanged DetGeo input PE."""
 
@@ -516,6 +562,7 @@ class TROGeoMSDetectionAblation(nn.Module):
                      TWO_SCALE_COLLAB_VARIANTS + HABR_VARIANTS + QUERY_REFINE_VARIANTS
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current', dadpe_mode='none',
+                 amr_pe_mode='none',
                  enable_hqs=False, enable_hqs_v2a=False, enable_hqs_v2b=False):
         super().__init__()
         if (emb_size != 768 or backbone not in ('swin_t', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
@@ -528,10 +575,16 @@ class TROGeoMSDetectionAblation(nn.Module):
         if dadpe_mode != 'none' and (variant not in self.DADPE_SUPPORTED_VARIANTS
                                      or position_mode != 'detgeo' or backbone != 'swin_t'):
             raise ValueError('DADPE requires A3-Bi, FG-Res, or Bi-Res, original DetGeo PE, and Swin-T')
+        if amr_pe_mode not in ('none', 'fixed', 'adaptive'):
+            raise ValueError('amr_pe_mode must be none/fixed/adaptive')
+        if amr_pe_mode != 'none' and (variant != 'h2_ind_amhcsfi_res_bi' or position_mode != 'detgeo'
+                                      or backbone != 'swin_t' or dadpe_mode != 'none'):
+            raise ValueError('AMR-PE requires Bi-Res, original DetGeo PE, Swin-T, and dadpe_mode=none')
         self.variant = variant
         self.position_mode = position_mode
         self.backbone_name = backbone
         self.dadpe_mode = dadpe_mode
+        self.amr_pe_mode = amr_pe_mode
         self.enable_hqs = bool(enable_hqs)
         self.enable_hqs_v2a = bool(enable_hqs_v2a)
         self.enable_hqs_v2b = bool(enable_hqs_v2b)
@@ -690,6 +743,11 @@ class TROGeoMSDetectionAblation(nn.Module):
             self.input_direction_residual = InputDirectionResidual()
             if self.dadpe_mode == 'multiscale':
                 self.multiscale_direction_residual = MultiScaleDirectionResidual()
+        # AMR-PE follows the ordinary --standard_rng protocol.  Constructing it
+        # after the Bi-Res public modules keeps their initial tensors identical
+        # to the DetGeo-PE baseline while naturally advancing later RNG state.
+        if self.amr_pe_mode != 'none':
+            self.amr_position_field = AdaptiveMultiRangePositionField(mode=self.amr_pe_mode)
         # v1 follows ordinary standard RNG; v2a pads/restores only to reproduce
         # v1's exact post-construction RNG state for the controlled comparison.
         if self.enable_hqs:
@@ -825,7 +883,15 @@ class TROGeoMSDetectionAblation(nn.Module):
         }.get(self.variant, 'none')
 
     def forward(self, query_imgs, reference_imgs, click_map):
-        position_feature = self.position_embedding(torch.cat((query_imgs, click_map.unsqueeze(1)), dim=1))
+        amr_weights = amr_d_multi = amr_alpha = amr_identity_error = None
+        if self.amr_pe_mode != 'none':
+            effective_click_map, amr_weights, amr_d_multi, amr_alpha = self.amr_position_field(
+                query_imgs, click_map)
+            amr_identity_error = (effective_click_map - click_map).abs().max()
+        else:
+            effective_click_map = click_map
+        position_feature = self.position_embedding(
+            torch.cat((query_imgs, effective_click_map.unsqueeze(1)), dim=1))
         geometry = input_dir_delta = dadpe_p3 = dadpe_p4 = None
         if self.dadpe_mode != 'none':
             geometry = build_directional_geometry(click_map)
@@ -1030,6 +1096,13 @@ class TROGeoMSDetectionAblation(nn.Module):
                         tuple(dadpe_p3.shape), tuple(dadpe_p4.shape),
                         self.multiscale_direction_residual.beta3.item(),
                         self.multiscale_direction_residual.beta4.item()), flush=True)
+                if self.amr_pe_mode != 'none':
+                    mean_weights = amr_weights.mean(dim=0)
+                    print('[AMR-PE sanity] mode={} gamma={:.6f} alpha={:.6f} '
+                          'w_f={:.6f} w_m={:.6f} w_c={:.6f} identity_error={:.8f}'.format(
+                              self.amr_pe_mode, self.amr_position_field.gamma.item(), amr_alpha.item(),
+                              mean_weights[0].item(), mean_weights[1].item(), mean_weights[2].item(),
+                              amr_identity_error.item()), flush=True)
                 if self.variant in self.CSFI_VARIANTS:
                     print('[E4-CSFI sanity] gate3_mean={:.6f} gate4_mean={:.6f} '
                           'alpha3={:.6f} alpha4={:.6f}'.format(

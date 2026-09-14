@@ -187,6 +187,8 @@ def main():
                         help='TROGeo click map: original distance-decay map or fixed Gaussian map')
     parser.add_argument('--dadpe_mode', choices=('none', 'input', 'multiscale'), default='none',
                         help='direction-aware DetGeo PE: none=A, input=B, multiscale=D')
+    parser.add_argument('--amr_pe_mode', choices=('none', 'fixed', 'adaptive'), default='none',
+                        help='AMR-PE front-end field: none=DetGeo PE, fixed=uniform ranges, adaptive=query ranges')
     parser.add_argument('--hqs_oracle_diag', action='store_true',
                         help='validation-only Oracle head-selection diagnostic for supported AMHCSFI-Res variants')
     parser.add_argument('--hqs_oracle_csv', default='', type=str,
@@ -294,6 +296,17 @@ def main():
             parser.error('--dadpe_mode requires --trogeo_click_map_mode distance')
         if args.trogeo_backbone != 'swin_t':
             parser.error('--dadpe_mode currently requires --trogeo_backbone swin_t')
+    if args.amr_pe_mode != 'none':
+        if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
+            parser.error('--amr_pe_mode is restricted to Bi-Res h2_ind_amhcsfi_res_bi')
+        if args.trogeo_position_mode != 'detgeo':
+            parser.error('--amr_pe_mode requires --trogeo_position_mode detgeo')
+        if args.trogeo_click_map_mode != 'distance':
+            parser.error('--amr_pe_mode requires --trogeo_click_map_mode distance')
+        if args.trogeo_backbone != 'swin_t':
+            parser.error('--amr_pe_mode currently requires --trogeo_backbone swin_t')
+        if args.dadpe_mode != 'none':
+            parser.error('--amr_pe_mode requires --dadpe_mode none for a front-end-only ablation')
     if args.hqs_oracle_diag:
         if args.trogeo_ms_det_variant not in ('h2_ind_fg_amhcsfi_res', 'h2_ind_amhcsfi_res_bi'):
             parser.error('--hqs_oracle_diag is restricted to '
@@ -485,7 +498,8 @@ def main():
         model = TROGeoMSDetectionAblation(emb_size=args.emb_size, backbone=args.trogeo_backbone,
                                            variant=args.trogeo_ms_det_variant,
                                            position_mode=args.trogeo_position_mode,
-                                           dadpe_mode=args.dadpe_mode, enable_hqs=args.hqs_v1,
+                                           dadpe_mode=args.dadpe_mode, amr_pe_mode=args.amr_pe_mode,
+                                           enable_hqs=args.hqs_v1,
                                            enable_hqs_v2a=args.hqs_v2a, enable_hqs_v2b=args.hqs_v2b)
     elif args.backbone_exp != 'baseline':
         model = DetGeoBackboneAblation(emb_size=args.emb_size, leaky=True, backbone_exp=args.backbone_exp)
