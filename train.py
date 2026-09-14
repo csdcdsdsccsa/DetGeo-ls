@@ -285,8 +285,9 @@ def main():
     if args.trogeo_backbone in ('vit_t', 'vit_s') and args.trogeo_ms_det_variant != 'h2_ind':
         parser.error('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
     if args.dadpe_mode != 'none':
-        if args.trogeo_ms_det_variant not in ('h2_ind_csfi_bi', 'h2_ind_fg_amhcsfi_res'):
-            parser.error('--dadpe_mode is restricted to A3-Bi or FG-Res')
+        if args.trogeo_ms_det_variant not in ('h2_ind_csfi_bi', 'h2_ind_fg_amhcsfi_res',
+                                               'h2_ind_amhcsfi_res_bi'):
+            parser.error('--dadpe_mode is restricted to A3-Bi, FG-Res, or Bi-Res')
         if args.trogeo_position_mode != 'detgeo':
             parser.error('--dadpe_mode requires --trogeo_position_mode detgeo')
         if args.trogeo_click_map_mode != 'distance':

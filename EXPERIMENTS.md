@@ -28,6 +28,21 @@
 | FG-NoCSFI natural | `h2_ind_fg_nocsfi` | natural `--standard_rng` | TBD | TBD |
 | Bi-NoCSFI natural | `h2_ind_bi_nocsfi` | natural `--standard_rng` | TBD | TBD |
 
+### Bi-Res DADPE natural-RNG sequence (results pending)
+
+Both runs retain the complete `h2_ind_amhcsfi_res_bi` Bi-Res path: shared
+Stage4 Direct-CA is used both before coarse guidance and after fine guidance,
+then AMHCSFI-Res updates the two maps before the unchanged dual detector heads.
+
+| Experiment | Variant | Position front end | DADPE mode | RNG protocol | Validation | Test |
+| --- | --- | --- | --- | --- | --- | --- |
+| Bi-Res + DADPE-B | `h2_ind_amhcsfi_res_bi` | DetGeo PE + distance | `input` | natural `--standard_rng` | TBD | TBD |
+| Bi-Res + MS-DADPE-D | `h2_ind_amhcsfi_res_bi` | DetGeo PE + distance | `multiscale` | natural `--standard_rng` | TBD | TBD |
+
+No RNG padding, isolation, restoration, post-model reseed, or cross-model
+initialization matching is used. Each run uses seed 2024, batch 7, 24 workers,
+Swin-T, 25 epochs, lr `1e-4`, validation-best selection, and one test pass.
+
 - Interpretation: `h2_ind_amhcsfi_bi` and `h2_ind_mhcsfi_bi` replace the
   interaction implementation; this table is therefore an ablation record, not
   evidence that either method improves every metric over A3-Bi.

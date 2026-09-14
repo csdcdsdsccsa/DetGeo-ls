@@ -487,6 +487,7 @@ class TROGeoMSDetectionAblation(nn.Module):
     ADAPTIVE_CSFI_CHANNEL_VARIANTS = ('h2_ind_csfi_cg_channel', 'h2_ind_csfi_cg_ar')
     ADAPTIVE_CSFI_DIRECTION_VARIANTS = ('h2_ind_csfi_cg_dir', 'h2_ind_csfi_cg_ar')
     NO_CSFI_GUIDE_VARIANTS = ('h2_ind_fg_nocsfi', 'h2_ind_bi_nocsfi')
+    DADPE_SUPPORTED_VARIANTS = ('h2_ind_csfi_bi', 'h2_ind_fg_amhcsfi_res', 'h2_ind_amhcsfi_res_bi')
     CG_HABR_PRIOR_VARIANTS = ('h2_ind_cg_habr_prior',)
     TWO_SCALE_COLLAB_VARIANTS = (TWO_SCALE_COLLAB_VARIANTS + ADAPTIVE_CSFI_VARIANTS + MHCSFI_VARIANTS + AMHCSFI_RES_VARIANTS +
                                  NO_CSFI_GUIDE_VARIANTS + CG_HABR_PRIOR_VARIANTS)
@@ -524,9 +525,9 @@ class TROGeoMSDetectionAblation(nn.Module):
             raise ValueError('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
         if dadpe_mode not in ('none', 'input', 'multiscale'):
             raise ValueError('dadpe_mode must be none/input/multiscale')
-        if dadpe_mode != 'none' and (variant not in ('h2_ind_csfi_bi', 'h2_ind_fg_amhcsfi_res')
+        if dadpe_mode != 'none' and (variant not in self.DADPE_SUPPORTED_VARIANTS
                                      or position_mode != 'detgeo' or backbone != 'swin_t'):
-            raise ValueError('DADPE requires A3-Bi or FG-Res, original DetGeo PE, and Swin-T')
+            raise ValueError('DADPE requires A3-Bi, FG-Res, or Bi-Res, original DetGeo PE, and Swin-T')
         self.variant = variant
         self.position_mode = position_mode
         self.backbone_name = backbone
