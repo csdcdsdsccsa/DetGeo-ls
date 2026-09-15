@@ -1,4 +1,5 @@
-"""CPU sanity checks for Bi-Res Quality-Calibrated Competition (QCC)."""
+"""CPU/GPU sanity checks for Bi-Res Quality-Calibrated Competition (QCC)."""
+import argparse
 import torch
 
 from model.TROGeo_ms_detection_ablation import TROGeoMSDetectionAblation
@@ -17,7 +18,33 @@ def manual_state(pair_iou):
     }
 
 
+def check_gpu_forward(variant):
+    if not torch.cuda.is_available() or not variant:
+        return
+    model = TROGeoMSDetectionAblation(variant=variant, position_mode='detgeo').cuda().eval()
+    with torch.no_grad():
+        predictions, _ = model(torch.randn(1, 3, 256, 256, device='cuda'),
+                               torch.randn(1, 3, 1024, 1024, device='cuda'),
+                               torch.rand(1, 256, 256, device='cuda'))
+    expected = {'stage3', 'stage4', 'coarse_logits', 'fine_logits', 'qcc_quality3', 'qcc_quality4'}
+    if set(predictions) != expected or predictions['qcc_quality3'].shape != (1, 9, 64, 64) or \
+            predictions['qcc_quality4'].shape != (1, 9, 64, 64):
+        raise RuntimeError('QCC forward output contract failed for {}: {}'.format(variant, sorted(predictions)))
+    if not (torch.allclose(torch.sigmoid(predictions['qcc_quality3']),
+                           torch.full_like(predictions['qcc_quality3'], 0.5)) and
+            torch.allclose(torch.sigmoid(predictions['qcc_quality4']),
+                           torch.full_like(predictions['qcc_quality4'], 0.5))):
+        raise RuntimeError('QCC forward quality heads do not start at 0.5')
+    del model, predictions
+    torch.cuda.empty_cache()
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--gpu_variant', choices=('h2_ind_amhcsfi_res_bi_qcc_a',
+                                                   'h2_ind_amhcsfi_res_bi_qcc_b',
+                                                   'h2_ind_amhcsfi_res_bi_qcc_full'))
+    args = parser.parse_args()
     torch.manual_seed(2024)
     model_a = TROGeoMSDetectionAblation(
         variant='h2_ind_amhcsfi_res_bi_qcc_a', position_mode='detgeo').train()
@@ -64,6 +91,7 @@ def main():
         raise RuntimeError('QCC quality head or ranker has no gradient')
     if model_a.qcc_ranker.mlp[-1].weight.grad is not None:
         raise RuntimeError('QCC-A must not consume ranker gradients')
+    check_gpu_forward(args.gpu_variant)
     print('QCC sanity passed: neutral-decoder=baseline quality=0.5 fusion-gate=correct gradients=isolated', flush=True)
 
 

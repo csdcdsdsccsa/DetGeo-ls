@@ -1050,13 +1050,6 @@ class TROGeoMSDetectionAblation(nn.Module):
             self._expect('E2 p3', p3, 30, 64, 64)
             self._expect('E2 p4', p4, 15, 32, 32)
             predictions = {'stage3': p3, 'stage4': p4}
-            if self.variant in self.QCC_VARIANTS:
-                q3_logits = self.qcc_quality_head_stage3(z3)
-                q4_logits = self.qcc_quality_head_stage4(aligned4)
-                self._expect('QCC quality3', q3_logits, 9, 64, 64)
-                self._expect('QCC quality4', q4_logits, 9, 64, 64)
-                predictions['qcc_quality3'] = q3_logits
-                predictions['qcc_quality4'] = q4_logits
         elif self.variant in self.FG_AMHCSFI_RES_SINGLE_VARIANTS:
             aligned4 = self.stage4_align(z4)
             fusion_weights = None
@@ -1103,6 +1096,13 @@ class TROGeoMSDetectionAblation(nn.Module):
             self._expect('H p3', p3, 45, 64, 64)
             self._expect('H p4', p4, 45, 64, 64)
             predictions = {'stage3': p3, 'stage4': p4}
+            if self.variant in self.QCC_VARIANTS:
+                q3_logits = self.qcc_quality_head_stage3(z3)
+                q4_logits = self.qcc_quality_head_stage4(aligned4)
+                self._expect('QCC quality3', q3_logits, 9, 64, 64)
+                self._expect('QCC quality4', q4_logits, 9, 64, 64)
+                predictions['qcc_quality3'] = q3_logits
+                predictions['qcc_quality4'] = q4_logits
             if self.enable_hqs or self.enable_hqs_v2a or self.enable_hqs_v2b:
                 batch_size = p3.shape[0]
                 feat3, feat4 = z3.mean(dim=(2, 3)).detach(), aligned4.mean(dim=(2, 3)).detach()
