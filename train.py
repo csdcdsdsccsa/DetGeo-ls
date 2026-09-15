@@ -157,7 +157,7 @@ def main():
         'h2_ind_csfi', 'h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier',
         'h2_ind_cg_habr_prior',
         'h2_ind_csfi_fg', 'h2_ind_csfi_bi', 'h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi', 'h2_ind_amhcsfi_res_bi',
-        'h2_ind_amhcsfi_res_bi_afuse',
+        'h2_ind_amhcsfi_res_bi_afuse', 'h2_ind_bires_afuse_b1', 'h2_ind_corr_afuse_b0',
         'h2_ind_amhcsfi_res_bi_qcc_a', 'h2_ind_amhcsfi_res_bi_qcc_af', 'h2_ind_amhcsfi_res_bi_qcc_b',
         'h2_ind_amhcsfi_res_bi_qcc_full',
         'h2_ind_cg_amhcsfi_res', 'h2_ind_fg_amhcsfi_res',
@@ -833,7 +833,8 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
     habr_prior_variants = ('h2_ind_habr_prior', 'h2_ind_habr_adapt', 'h2_ind_habr')
     fg_amhcsfi_single_variants = (
         'h2_ind_fg_amhcsfi_res_s3', 'h2_ind_fg_amhcsfi_res_s4', 'h2_ind_fg_amhcsfi_res_afuse')
-    bi_amhcsfi_single_variants = ('h2_ind_amhcsfi_res_bi_afuse',)
+    bi_afuse_guided_single_variants = ('h2_ind_amhcsfi_res_bi_afuse', 'h2_ind_bires_afuse_b1')
+    corr_afuse_b0_variants = ('h2_ind_corr_afuse_b0',)
     qcc_a_variants = ('h2_ind_amhcsfi_res_bi_qcc_a',)
     qcc_af_variants = ('h2_ind_amhcsfi_res_bi_qcc_af',)
     qcc_rank_variants = ('h2_ind_amhcsfi_res_bi_qcc_b', 'h2_ind_amhcsfi_res_bi_qcc_full')
@@ -890,7 +891,7 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
         if 'fusion_weights' in predictions:
             diagnostics['fusion_w3'] = predictions['fusion_weights'][:, 0].mean()
             diagnostics['fusion_w4'] = predictions['fusion_weights'][:, 1].mean()
-    elif variant in bi_amhcsfi_single_variants:
+    elif variant in bi_afuse_guided_single_variants:
         p = predictions['single'].view(predictions['single'].shape[0], 9, 5, 64, 64)
         target, best = build_target(ori_gt_bbox, anchors_full, args.img_size, 64)
         if include_loss:
@@ -906,6 +907,20 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
         diagnostics = {
             'fusion_w3': predictions['fusion_weights'][:, 0].mean(),
             'fusion_w4': predictions['fusion_weights'][:, 1].mean(),
+        }
+    elif variant in corr_afuse_b0_variants:
+        p = predictions['single'].view(predictions['single'].shape[0], 9, 5, 64, 64)
+        target, best = build_target(ori_gt_bbox, anchors_full, args.img_size, 64)
+        if include_loss:
+            loss_geo, loss_cls = yolo_loss(p, target, anchors_full, best, args.img_size)
+        else:
+            loss_geo = loss_cls = None
+        final_box, _ = decode_top1(p, anchors_full, args.img_size)
+        diagnostics = {
+            'fusion_w3': predictions['fusion_weights'][:, 0].mean(),
+            'fusion_w4': predictions['fusion_weights'][:, 1].mean(),
+            'corr_gate3_mean': predictions['corr_gate3'].mean(),
+            'corr_gate4_mean': predictions['corr_gate4'].mean(),
         }
     elif variant in qcc_variants:
         p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)

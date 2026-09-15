@@ -31,6 +31,19 @@ def build_directional_geometry(distance_map):
     return torch.stack((distance_map, x_map, y_map), dim=1)
 
 
+def parameter_free_cosine_correlation(query_feature, satellite_feature, eps=1e-6):
+    """Zero-parameter query-to-satellite correlation residual gate."""
+    if query_feature.dim() != 4 or satellite_feature.dim() != 4:
+        raise RuntimeError('correlation features must be BCHW')
+    if query_feature.shape[:2] != satellite_feature.shape[:2]:
+        raise RuntimeError('correlation query/satellite batch or channel mismatch')
+    query_proto = F.normalize(F.adaptive_avg_pool2d(query_feature, output_size=1), p=2, dim=1, eps=eps)
+    similarity = (F.normalize(satellite_feature, p=2, dim=1, eps=eps) * query_proto).sum(dim=1, keepdim=True)
+    sim_min, sim_max = similarity.amin(dim=(2, 3), keepdim=True), similarity.amax(dim=(2, 3), keepdim=True)
+    gate = (similarity - sim_min) / (sim_max - sim_min + eps)
+    return satellite_feature * (1.0 + gate), gate
+
+
 class AdaptiveMultiRangePositionField(nn.Module):
     """Refine a DetGeo distance field with fixed or query-adaptive ranges.
 
@@ -554,6 +567,9 @@ class TROGeoMSDetectionAblation(nn.Module):
     # this sibling changes only the final detector from two heads to an
     # adaptive Stage-3/4 fused single head.
     AMHCSFI_RES_BI_SINGLE_VARIANTS = ('h2_ind_amhcsfi_res_bi_afuse',)
+    AFUSE_B1_VARIANTS = ('h2_ind_bires_afuse_b1',)
+    AFUSE_B0_VARIANTS = ('h2_ind_corr_afuse_b0',)
+    AFUSE_NEW_VARIANTS = AFUSE_B1_VARIANTS + AFUSE_B0_VARIANTS
     FG_AMHCSFI_RES_SINGLE_VARIANTS = (
         'h2_ind_fg_amhcsfi_res_s3', 'h2_ind_fg_amhcsfi_res_s4', 'h2_ind_fg_amhcsfi_res_afuse')
     AMHCSFI_RES_GUIDE_VARIANTS = ('h2_ind_cg_amhcsfi_res', 'h2_ind_fg_amhcsfi_res') + \
@@ -566,19 +582,19 @@ class TROGeoMSDetectionAblation(nn.Module):
     DADPE_SUPPORTED_VARIANTS = ('h2_ind_csfi_bi', 'h2_ind_fg_amhcsfi_res', 'h2_ind_amhcsfi_res_bi')
     CG_HABR_PRIOR_VARIANTS = ('h2_ind_cg_habr_prior',)
     TWO_SCALE_COLLAB_VARIANTS = (TWO_SCALE_COLLAB_VARIANTS + ADAPTIVE_CSFI_VARIANTS + MHCSFI_VARIANTS + AMHCSFI_RES_VARIANTS +
-                                 NO_CSFI_GUIDE_VARIANTS + CG_HABR_PRIOR_VARIANTS)
+                                 NO_CSFI_GUIDE_VARIANTS + CG_HABR_PRIOR_VARIANTS + AFUSE_NEW_VARIANTS)
     CSFI_VARIANTS = (
         'h2_ind_csfi', 'h2_ind_csfi_cg', 'h2_ind_hier',
         'h2_ind_csfi_fg', 'h2_ind_csfi_bi') + AMHCSFI_RES_VARIANTS
     COARSE_GUIDE_VARIANTS = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier', 'h2_ind_csfi_bi',
                              'h2_ind_bi_nocsfi', 'h2_ind_cg_amhcsfi_res') + MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS + AMHCSFI_RES_BI_SINGLE_VARIANTS + CG_HABR_PRIOR_VARIANTS + \
-                            ADAPTIVE_CSFI_VARIANTS
+                            ADAPTIVE_CSFI_VARIANTS + AFUSE_B1_VARIANTS
     FINE_GUIDE_VARIANTS = ('h2_ind_csfi_fg', 'h2_ind_csfi_bi', 'h2_ind_fg_nocsfi', 'h2_ind_bi_nocsfi',
                            'h2_ind_fg_amhcsfi_res') + FG_AMHCSFI_RES_SINGLE_VARIANTS + \
-                          MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS + AMHCSFI_RES_BI_SINGLE_VARIANTS
+                          MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS + AMHCSFI_RES_BI_SINGLE_VARIANTS + AFUSE_B1_VARIANTS
     FINE_ONLY_GUIDE_VARIANTS = ('h2_ind_csfi_fg', 'h2_ind_fg_nocsfi', 'h2_ind_fg_amhcsfi_res') + \
                                FG_AMHCSFI_RES_SINGLE_VARIANTS
-    BIDIR_GUIDE_VARIANTS = ('h2_ind_csfi_bi', 'h2_ind_bi_nocsfi') + MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS + AMHCSFI_RES_BI_SINGLE_VARIANTS
+    BIDIR_GUIDE_VARIANTS = ('h2_ind_csfi_bi', 'h2_ind_bi_nocsfi') + MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS + AMHCSFI_RES_BI_SINGLE_VARIANTS + AFUSE_B1_VARIANTS
     HABR_VARIANTS = ('h2_ind_habr_core', 'h2_ind_habr_prior', 'h2_ind_habr_adapt', 'h2_ind_habr') + \
                     CG_HABR_PRIOR_VARIANTS
     HABR_MODE = {
@@ -654,10 +670,11 @@ class TROGeoMSDetectionAblation(nn.Module):
         if self.three_scale:
             self.cvopm_stage2 = SpatialTransformer(192, 3, 64, depth=1, context_dim=192,
                                                     use_self_attention=False, query_chunk_size=512)
-        self.cvopm_stage3 = SpatialTransformer(384, 6, 64, depth=1, context_dim=384,
-                                                use_self_attention=False)
-        self.cvopm_stage4 = SpatialTransformer(768, 12, 64, depth=1, context_dim=768,
-                                                use_self_attention=False)
+        if variant not in self.AFUSE_B0_VARIANTS:
+            self.cvopm_stage3 = SpatialTransformer(384, 6, 64, depth=1, context_dim=384,
+                                                    use_self_attention=False)
+            self.cvopm_stage4 = SpatialTransformer(768, 12, 64, depth=1, context_dim=768,
+                                                    use_self_attention=False)
         self._logged_sanity = False
 
         if variant == 'correct63':
@@ -680,7 +697,7 @@ class TROGeoMSDetectionAblation(nn.Module):
             )
             if variant == 'h2_shared':
                 self.det_head_shared = nn.Conv2d(384, 45, kernel_size=1)
-            elif variant in self.FG_AMHCSFI_RES_SINGLE_VARIANTS + self.AMHCSFI_RES_BI_SINGLE_VARIANTS:
+            elif variant in self.FG_AMHCSFI_RES_SINGLE_VARIANTS + self.AMHCSFI_RES_BI_SINGLE_VARIANTS + self.AFUSE_NEW_VARIANTS:
                 self.det_head_single = nn.Conv2d(384, 45, kernel_size=1)
                 if variant in self.FG_AMHCSFI_RES_SINGLE_VARIANTS:
                     _rng_pad_stage4_head = nn.Conv2d(384, 45, kernel_size=1)
@@ -782,6 +799,9 @@ class TROGeoMSDetectionAblation(nn.Module):
         elif self.variant in self.AMHCSFI_RES_BI_SINGLE_VARIANTS:
             # New experiments intentionally consume ordinary --standard_rng;
             # no state restore or synthetic parameter padding is used here.
+            self.stage34_adaptive_fusion = AdaptiveStage34Fusion(channels=384, hidden_dim=128)
+        elif self.variant in self.AFUSE_NEW_VARIANTS:
+            # Fresh B0/B1 ablations use ordinary natural RNG without padding.
             self.stage34_adaptive_fusion = AdaptiveStage34Fusion(channels=384, hidden_dim=128)
         if self.variant in self.HABR_VARIANTS:
             self.habr_former = HABRFormer(mode=self.HABR_MODE[self.variant], relation_dim=256,
@@ -969,6 +989,7 @@ class TROGeoMSDetectionAblation(nn.Module):
         csfi_gate3 = csfi_gate4 = None
         coarse_logits = coarse_up = None
         fine_logits = fine_down = None
+        corr_gate3 = corr_gate4 = None
         habr_prior3_logits = habr_prior4_logits = habr_diagnostics = None
         adaptive_csfi_diagnostics = mhcsfi_diagnostics = None
         pqra_delta3 = pqra_delta4 = pqra_position3 = pqra_position4 = None
@@ -993,7 +1014,10 @@ class TROGeoMSDetectionAblation(nn.Module):
         self._expect('satellite stage4', r4, 768, 32, 32)
         if self.dadpe_mode == 'multiscale':
             q3, q4, dadpe_p3, dadpe_p4 = self.multiscale_direction_residual(q3, q4, geometry)
-        if self.variant in self.BIDIR_GUIDE_VARIANTS:
+        if self.variant in self.AFUSE_B0_VARIANTS:
+            z3, corr_gate3 = parameter_free_cosine_correlation(q3, r3)
+            z4, corr_gate4 = parameter_free_cosine_correlation(q4, r4)
+        elif self.variant in self.BIDIR_GUIDE_VARIANTS:
             # Reuse the same CA4 parameters for both passes: first to derive
             # the coarse Stage4 prior, then to refine the final Stage4 map.
             z4_seed = self.cvopm_stage4(r4, context=self._to_tokens(q4))
@@ -1101,6 +1125,28 @@ class TROGeoMSDetectionAblation(nn.Module):
                 'coarse_logits': coarse_logits,
                 'fine_logits': fine_logits,
                 'fusion_weights': fusion_weights,
+            }
+        elif self.variant in self.AFUSE_B1_VARIANTS:
+            aligned4 = self.stage4_align(z4)
+            detection_feature, fusion_weights = self.stage34_adaptive_fusion(z3, aligned4)
+            p = self.det_head_single(detection_feature)
+            self._expect('B1 Bi-Res AFuse single head', p, 45, 64, 64)
+            predictions = {
+                'single': p,
+                'coarse_logits': coarse_logits,
+                'fine_logits': fine_logits,
+                'fusion_weights': fusion_weights,
+            }
+        elif self.variant in self.AFUSE_B0_VARIANTS:
+            aligned4 = self.stage4_align(z4)
+            detection_feature, fusion_weights = self.stage34_adaptive_fusion(z3, aligned4)
+            p = self.det_head_single(detection_feature)
+            self._expect('B0 Corr AFuse single head', p, 45, 64, 64)
+            predictions = {
+                'single': p,
+                'fusion_weights': fusion_weights,
+                'corr_gate3': corr_gate3,
+                'corr_gate4': corr_gate4,
             }
         elif self.variant in self.HIER_VARIANTS:
             p3 = self.det_head_stage3(z3)
