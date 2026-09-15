@@ -359,9 +359,12 @@ def main():
             parser.error('--agreement_fusion_decode is inference-only; use --val or --test')
         if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
             parser.error('--agreement_fusion_decode requires --trogeo_ms_det_variant h2_ind_amhcsfi_res_bi')
-        if not args.bbox_threshold_reg:
-            parser.error('--agreement_fusion_decode is reserved for Threshold-Reg checkpoint evaluation; '
-                         'also pass --bbox_threshold_reg')
+        if args.trogeo_backbone != 'swin_t' or args.trogeo_position_mode != 'detgeo':
+            parser.error('--agreement_fusion_decode requires Swin-T and original DetGeo PE')
+        if args.trogeo_click_map_mode != 'distance':
+            parser.error('--agreement_fusion_decode requires --trogeo_click_map_mode distance')
+        if args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
+            parser.error('--agreement_fusion_decode requires dadpe_mode=none and amr_pe_mode=none')
     if args.hqs_oracle_diag:
         if args.trogeo_ms_det_variant not in ('h2_ind_fg_amhcsfi_res', 'h2_ind_amhcsfi_res_bi'):
             parser.error('--hqs_oracle_diag is restricted to '
