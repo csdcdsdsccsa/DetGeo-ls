@@ -50,7 +50,7 @@ from utils.utils import AverageMeter, eval_iou_acc, bbox_iou
 from utils.multiscale_detection import (decode_multigrid_top1, decode_top1, select_two_heads, select_two_heads_hqs,
                                         select_two_heads_hqs_v2a, select_three_heads,
                                         eval_decoded_boxes, analyze_two_head_oracle, build_qcc_state,
-                                        select_qcc_a, select_qcc_ranked)
+                                        select_qcc_a, select_qcc_af, select_qcc_ranked)
 from utils.checkpoint import save_checkpoint, load_pretrain
 
 
@@ -157,7 +157,7 @@ def main():
         'h2_ind_cg_habr_prior',
         'h2_ind_csfi_fg', 'h2_ind_csfi_bi', 'h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi', 'h2_ind_amhcsfi_res_bi',
         'h2_ind_amhcsfi_res_bi_afuse',
-        'h2_ind_amhcsfi_res_bi_qcc_a', 'h2_ind_amhcsfi_res_bi_qcc_b',
+        'h2_ind_amhcsfi_res_bi_qcc_a', 'h2_ind_amhcsfi_res_bi_qcc_af', 'h2_ind_amhcsfi_res_bi_qcc_b',
         'h2_ind_amhcsfi_res_bi_qcc_full',
         'h2_ind_cg_amhcsfi_res', 'h2_ind_fg_amhcsfi_res',
         'h2_ind_fg_amhcsfi_res_s3', 'h2_ind_fg_amhcsfi_res_s4', 'h2_ind_fg_amhcsfi_res_afuse',
@@ -179,7 +179,7 @@ def main():
     parser.add_argument('--qcc_rank_epsilon', default=0.03, type=float,
                         help='QCC ignore band for the two heads GT-IoU gap')
     parser.add_argument('--qcc_fusion_iou', default=0.5, type=float,
-                        help='QCC-Full predicted-box agreement IoU threshold')
+                        help='QCC-AF/QCC-Full predicted-box agreement IoU threshold')
     parser.add_argument('--bbox_threshold_reg', action='store_true',
                         help='enable Acc@0.25/0.50-oriented positive-box threshold regularization')
     parser.add_argument('--bbox_threshold_reg_weight', default=0.2, type=float,
@@ -250,6 +250,8 @@ def main():
     if args.rccd_weight < 0.0 or args.rccd_temperature <= 0.0 or args.rccd_tau <= 0.0 or \
             args.rccd_warmup_epochs < 0 or args.rccd_ramp_epochs < 0:
         parser.error('RCCD requires nonnegative weight/epochs and positive temperatures')
+    if not 0.0 <= args.qcc_fusion_iou <= 1.0:
+        parser.error('--qcc_fusion_iou must be in [0,1]')
     if args.loader_seed is None:
         args.loader_seed = args.seed
     if args.runtime_seed is None:
@@ -776,8 +778,9 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
         'h2_ind_fg_amhcsfi_res_s3', 'h2_ind_fg_amhcsfi_res_s4', 'h2_ind_fg_amhcsfi_res_afuse')
     bi_amhcsfi_single_variants = ('h2_ind_amhcsfi_res_bi_afuse',)
     qcc_a_variants = ('h2_ind_amhcsfi_res_bi_qcc_a',)
+    qcc_af_variants = ('h2_ind_amhcsfi_res_bi_qcc_af',)
     qcc_rank_variants = ('h2_ind_amhcsfi_res_bi_qcc_b', 'h2_ind_amhcsfi_res_bi_qcc_full')
-    qcc_variants = qcc_a_variants + qcc_rank_variants
+    qcc_variants = qcc_a_variants + qcc_af_variants + qcc_rank_variants
     loss_aux = None
     qcc_losses = None
     three_scale_variants = (
@@ -863,6 +866,8 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
                                 anchors_full, args.img_size)
         if variant in qcc_a_variants:
             final_box, diagnostics = select_qcc_a(state)
+        elif variant in qcc_af_variants:
+            final_box, diagnostics = select_qcc_af(state, fusion_iou=args.qcc_fusion_iou)
         else:
             if 'qcc_rank_logit' not in predictions:
                 raise RuntimeError('QCC-B/Full requires detached qcc_rank_logit before decoding')

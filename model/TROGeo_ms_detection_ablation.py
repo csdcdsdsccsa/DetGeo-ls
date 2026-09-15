@@ -544,9 +544,10 @@ class TROGeoMSDetectionAblation(nn.Module):
     ADAPTIVE_CSFI_VARIANTS = ('h2_ind_csfi_cg_channel', 'h2_ind_csfi_cg_dir', 'h2_ind_csfi_cg_ar')
     MHCSFI_VARIANTS = ('h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi')
     QCC_A_VARIANTS = ('h2_ind_amhcsfi_res_bi_qcc_a',)
+    QCC_AF_VARIANTS = ('h2_ind_amhcsfi_res_bi_qcc_af',)
     QCC_RANK_VARIANTS = ('h2_ind_amhcsfi_res_bi_qcc_b', 'h2_ind_amhcsfi_res_bi_qcc_full')
     QCC_FULL_VARIANTS = ('h2_ind_amhcsfi_res_bi_qcc_full',)
-    QCC_VARIANTS = QCC_A_VARIANTS + QCC_RANK_VARIANTS
+    QCC_VARIANTS = QCC_A_VARIANTS + QCC_AF_VARIANTS + QCC_RANK_VARIANTS
     AMHCSFI_RES_BI_VARIANTS = ('h2_ind_amhcsfi_res_bi',) + QCC_VARIANTS
     # Bi-Res keeps its bidirectional guidance and auxiliary heatmap losses;
     # this sibling changes only the final detector from two heads to an

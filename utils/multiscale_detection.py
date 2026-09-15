@@ -64,6 +64,31 @@ def select_qcc_a(state):
     }
 
 
+def select_qcc_af(state, fusion_iou=0.5):
+    """QCC-A reliability competition with agreement-aware box fusion only.
+
+    This decoder intentionally does not accept or consume a ranker output.
+    Below the agreement threshold it is exactly QCC-A; above it, the two
+    decoded boxes are fused using the same confidence-times-quality weights.
+    """
+    if not 0.0 <= float(fusion_iou) <= 1.0:
+        raise ValueError('QCC-AF fusion_iou must be in [0, 1]')
+    r3 = state['score3'] * state['quality3']
+    r4 = state['score4'] * state['quality4']
+    use3 = r3 >= r4
+    winner = torch.where(use3[:, None], state['box3'], state['box4'])
+    fusion_mask = state['pair_iou'] >= float(fusion_iou)
+    fused = (r3[:, None] * state['box3'] + r4[:, None] * state['box4']) / \
+        (r3 + r4).clamp_min(1e-12)[:, None]
+    selected = torch.where(fusion_mask[:, None], fused, winner)
+    return selected, {
+        'qcc_quality3': state['quality3'].mean(), 'qcc_quality4': state['quality4'].mean(),
+        'qcc_reliability3': r3.mean(), 'qcc_reliability4': r4.mean(),
+        'qcc_head3_ratio': use3.float().mean(), 'qcc_head4_ratio': (~use3).float().mean(),
+        'qcc_pair_iou': state['pair_iou'].mean(), 'qcc_fusion_ratio': fusion_mask.float().mean(),
+    }
+
+
 def select_qcc_ranked(state, rank_logit, fusion_iou=None):
     p3 = torch.sigmoid(rank_logit)
     r3 = p3 * state['score3'] * state['quality3']
