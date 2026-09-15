@@ -42,6 +42,7 @@ from model.DetGeo_single_scale_ca import DetGeoSingleScaleCA
 from model.TROGeo_wo_ost import TROGeoWoOST
 from model.TROGeo_ms_direct_ca_sh import TROGeoMSDirectCASH
 from model.TROGeo_ms_detection_ablation import TROGeoMSDetectionAblation
+from model.acr_head import box_to_code
 from model.loss import yolo_loss, build_target, adjust_learning_rate
 from model.multiscale_detection_loss import (multigrid_yolo_loss, two_head_yolo_loss, three_head_yolo_loss,
                                              three_head_yolo_loss_stage2_cls_half, coarse_heatmap_loss,
@@ -202,6 +203,14 @@ def main():
     parser.add_argument('--agreement_fusion_decode', action='store_true',
                         help='inference-only two-head agreement fusion: pair IoU >= h3_iou_threshold uses '
                              'score-weighted box fusion; otherwise retain score competition')
+    parser.add_argument('--acr_head', action='store_true',
+                        help='freeze completed Bi-Res and train only the local ACR refinement head')
+    parser.add_argument('--acr_lr', default=1e-3, type=float)
+    parser.add_argument('--acr_iou_threshold', default=0.5, type=float)
+    parser.add_argument('--acr_giou_weight', default=1.0, type=float)
+    parser.add_argument('--acr_reg_weight', default=0.5, type=float)
+    parser.add_argument('--acr_alpha_weight', default=0.01, type=float)
+    parser.add_argument('--acr_weight_decay', default=1e-4, type=float)
     parser.add_argument('--trogeo_backbone', choices=('swin_s', 'swin_t', 'resnet50', 'vit_t', 'vit_s'), default='swin_s',
                         help='shared ImageNet backbone for TROGeo modes')
     parser.add_argument('--trogeo_aug_mode', choices=('current', 'detgeo'), default='current',
@@ -365,6 +374,23 @@ def main():
             parser.error('--agreement_fusion_decode requires --trogeo_click_map_mode distance')
         if args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
             parser.error('--agreement_fusion_decode requires dadpe_mode=none and amr_pe_mode=none')
+    if args.acr_head:
+        if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
+            parser.error('--acr_head requires h2_ind_amhcsfi_res_bi')
+        if args.trogeo_backbone != 'swin_t' or args.trogeo_position_mode != 'detgeo':
+            parser.error('--acr_head requires Swin-T and original DetGeo PE')
+        if args.trogeo_click_map_mode != 'distance' or args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
+            parser.error('--acr_head requires distance map, dadpe_mode=none, and amr_pe_mode=none')
+        if args.bbox_threshold_reg or args.agreement_fusion_decode or args.rccd or args.hqs_v1 or args.hqs_v2a or args.hqs_v2b:
+            parser.error('--acr_head first-stage experiment cannot combine other decoder/loss selectors')
+        if not (args.pretrain or args.resume):
+            parser.error('--acr_head requires the completed Bi-Res checkpoint')
+        if not 0.0 <= args.acr_iou_threshold <= 1.0:
+            parser.error('--acr_iou_threshold must be in [0,1]')
+        if args.acr_lr <= 0.0 or args.acr_weight_decay < 0.0:
+            parser.error('--acr_lr must be > 0 and --acr_weight_decay must be >= 0')
+        if min(args.acr_giou_weight, args.acr_reg_weight, args.acr_alpha_weight) < 0.0:
+            parser.error('ACR loss weights must be >= 0')
     if args.hqs_oracle_diag:
         if args.trogeo_ms_det_variant not in ('h2_ind_fg_amhcsfi_res', 'h2_ind_amhcsfi_res_bi'):
             parser.error('--hqs_oracle_diag is restricted to '
@@ -559,7 +585,8 @@ def main():
                                            dadpe_mode=args.dadpe_mode, amr_pe_mode=args.amr_pe_mode,
                                            gaussian_sigma=args.gaussian_sigma,
                                            enable_hqs=args.hqs_v1,
-                                           enable_hqs_v2a=args.hqs_v2a, enable_hqs_v2b=args.hqs_v2b)
+                                           enable_hqs_v2a=args.hqs_v2a, enable_hqs_v2b=args.hqs_v2b,
+                                           enable_acr=args.acr_head)
     elif args.backbone_exp != 'baseline':
         model = DetGeoBackboneAblation(emb_size=args.emb_size, leaky=True, backbone_exp=args.backbone_exp)
     elif args.single_scale_ca:
@@ -598,6 +625,17 @@ def main():
 
     if args.pretrain:
         model = load_pretrain(model, args, logging)
+
+    if args.acr_head:
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        for parameter in model.module.acr_refiner.parameters():
+            parameter.requires_grad = True
+        trainable_names = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+        if not trainable_names or not all(name.startswith('module.acr_refiner.') for name in trainable_names):
+            raise RuntimeError('ACR unexpectedly unfroze Bi-Res parameters: {}'.format(trainable_names))
+        print('[ACR] frozen Bi-Res; trainable ACR parameters={}'.format(
+            sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)))
 
     if args.hqs_v1:
         for parameter in model.parameters():
@@ -652,7 +690,10 @@ def main():
     print('Num of parameters:', sum([param.nelement() for param in model.parameters()]))
     logging.info('Num of parameters:%d'%int(sum([param.nelement() for param in model.parameters()])))
 
-    if args.hqs_v1:
+    if args.acr_head:
+        optimizer = torch.optim.AdamW(model.module.acr_refiner.parameters(), lr=args.acr_lr,
+                                      weight_decay=args.acr_weight_decay)
+    elif args.hqs_v1:
         optimizer = torch.optim.Adam(model.module.head_quality_selector.parameters(), lr=args.hqs_lr, betas=(0.9, 0.999))
     elif args.hqs_v2a:
         optimizer = torch.optim.Adam(model.module.head_pairwise_ranker.parameters(), lr=args.hqs_lr, betas=(0.9, 0.999))
@@ -719,7 +760,9 @@ def main():
     else:
         for epoch in range(start_epoch, args.max_epoch):
             gc.collect()
-            if args.hqs_v2b:
+            if args.acr_head:
+                train_acr_epoch(train_loader, model, optimizer, epoch, args)
+            elif args.hqs_v2b:
                 train_hqs_v2b_epoch(train_loader, model, optimizer, epoch, args)
             elif args.hqs_v2a:
                 train_hqs_v2a_epoch(train_loader, model, optimizer, epoch, args)
@@ -958,6 +1001,57 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
     return loss_geo, loss_cls, loss_aux, qcc_losses, final_box, diagnostics
 
 
+def decode_acr_predictions(model, predictions, anchors_full, args):
+    """Decode frozen Bi-Res heads and refine only agreeing box pairs."""
+    p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)
+    p4 = predictions['stage4'].view(predictions['stage4'].shape[0], 9, 5, 64, 64)
+    box3, score3 = decode_top1(p3, anchors_full, args.img_size)
+    box4, score4 = decode_top1(p4, anchors_full, args.img_size)
+    pair_iou = bbox_iou(box3, box4, x1y1x2y2=True).clamp(0.0, 1.0)
+    use3 = score3 >= score4
+    winner = torch.where(use3[:, None], box3, box4)
+    acr_state = model.module.acr_refiner(
+        predictions['acr_feature3'], predictions['acr_feature4'], box3.detach(), box4.detach(),
+        score3.detach(), score4.detach(), pair_iou.detach(), args.img_size)
+    active = pair_iou >= float(args.acr_iou_threshold)
+    final_box = torch.where(active[:, None], acr_state['refined_box'], winner)
+    diagnostics = {
+        'acr_active_ratio': active.float().mean(), 'acr_pair_iou': pair_iou.mean(),
+        'acr_head3_winner_ratio': use3.float().mean(), 'acr_alpha0': acr_state['alpha0'].mean(),
+        'acr_alpha': acr_state['alpha'].mean(),
+        'acr_abs_delta_alpha': acr_state['delta_alpha'].abs().mean(),
+        'acr_abs_box_delta': acr_state['box_delta'].abs().mean(),
+    }
+    return final_box, acr_state, active, diagnostics
+
+
+def aligned_giou(box1, box2, eps=1e-6):
+    """Per-sample generalized IoU for paired xyxy boxes."""
+    top_left, bottom_right = torch.maximum(box1[:, :2], box2[:, :2]), torch.minimum(box1[:, 2:], box2[:, 2:])
+    inter_wh = (bottom_right - top_left).clamp_min(0.0)
+    inter = inter_wh[:, 0] * inter_wh[:, 1]
+    area1 = (box1[:, 2] - box1[:, 0]).clamp_min(0.0) * (box1[:, 3] - box1[:, 1]).clamp_min(0.0)
+    area2 = (box2[:, 2] - box2[:, 0]).clamp_min(0.0) * (box2[:, 3] - box2[:, 1]).clamp_min(0.0)
+    union = area1 + area2 - inter
+    iou = inter / (union + eps)
+    enclosing_tl, enclosing_br = torch.minimum(box1[:, :2], box2[:, :2]), torch.maximum(box1[:, 2:], box2[:, 2:])
+    enclosing_wh = (enclosing_br - enclosing_tl).clamp_min(0.0)
+    enclosing_area = enclosing_wh[:, 0] * enclosing_wh[:, 1]
+    return iou - (enclosing_area - union) / (enclosing_area + eps)
+
+
+def acr_refinement_loss(acr_state, gt_box, active, args):
+    """First-stage ACR loss, intentionally limited to agreeing detector pairs."""
+    if not bool(active.any()):
+        return None, {'giou': 0.0, 'reg': 0.0, 'alpha': 0.0}
+    refined_box, refined_code, target = (acr_state['refined_box'][active], acr_state['refined_code'][active], gt_box[active])
+    loss_giou = (1.0 - aligned_giou(refined_box, target)).mean()
+    loss_reg = F.smooth_l1_loss(refined_code, box_to_code(target, args.img_size))
+    loss_alpha = acr_state['delta_alpha'][active].abs().mean()
+    total = args.acr_giou_weight * loss_giou + args.acr_reg_weight * loss_reg + args.acr_alpha_weight * loss_alpha
+    return total, {'giou': loss_giou.detach(), 'reg': loss_reg.detach(), 'alpha': loss_alpha.detach()}
+
+
 def hqs_quality_loss(predictions, ori_gt_bbox, anchors_full, args):
     p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)
     p4 = predictions['stage4'].view(predictions['stage4'].shape[0], 9, 5, 64, 64)
@@ -1187,6 +1281,52 @@ def train_hqs_epoch(train_loader, model, optimizer, epoch, args):
             print(text); logging.info(text)
 
 
+def train_acr_epoch(train_loader, model, optimizer, epoch, args):
+    """Train ACR while every completed Bi-Res module, including BN, stays frozen."""
+    losses, giou_losses, reg_losses, alpha_losses = AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter()
+    avg_accu50, avg_accu25, avg_iou, avg_center, avg_active = (
+        AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter())
+    model.eval()
+    model.module.acr_refiner.train()
+    anchors_full = np.array([float(x.strip()) for x in args.anchors.split(',')]).reshape(-1, 2)[::-1].copy()
+    anchors_full = torch.tensor(anchors_full, dtype=torch.float32).cuda()
+    for batch_idx, batch in enumerate(train_loader):
+        query_imgs, rs_imgs, click_map, ori_gt_bbox, _, prompt_maps = unpack_batch(batch, args)
+        query_imgs, rs_imgs, click_map = query_imgs.cuda(), rs_imgs.cuda(), click_map.cuda()
+        prompt_maps = tuple(prompt_map.cuda() for prompt_map in prompt_maps)
+        ori_gt_bbox = torch.clamp(ori_gt_bbox.cuda(), min=0, max=args.img_size - 1)
+        # The model forward includes the frozen detector only.  ACR itself is
+        # deliberately evaluated outside no_grad so it alone receives gradients.
+        with torch.no_grad():
+            predictions, _ = forward_model(model, query_imgs, rs_imgs, click_map, prompt_maps)
+        final_box, acr_state, active, diagnostics = decode_acr_predictions(model, predictions, anchors_full, args)
+        loss, loss_diag = acr_refinement_loss(acr_state, ori_gt_bbox, active, args)
+        if loss is not None:
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            active_count = int(active.sum().item())
+            losses.update(loss.item(), active_count)
+            giou_losses.update(float(loss_diag['giou']), active_count)
+            reg_losses.update(float(loss_diag['reg']), active_count)
+            alpha_losses.update(float(loss_diag['alpha']), active_count)
+        with torch.no_grad():
+            accu50, accu25, iou, center = eval_decoded_boxes(final_box.detach(), ori_gt_bbox, args.img_size)
+        batch_size = query_imgs.shape[0]
+        avg_accu50.update(float(accu50), batch_size)
+        avg_accu25.update(float(accu25), batch_size)
+        avg_iou.update(float(iou), batch_size)
+        avg_center.update(float(center), batch_size)
+        avg_active.update(float(active.float().mean()), batch_size)
+        if batch_idx % args.print_freq == 0:
+            message = ('[ACR] Epoch [{}/{}] [{}/{}] Loss {:.5f} GIoU {:.5f} Reg {:.5f} Alpha {:.5f} '
+                       'Active {:.2f}% Accu50 {:.4f} Accu25 {:.4f} Mean_iou {:.4f} Accu_c {:.4f}').format(
+                epoch, args.max_epoch, batch_idx, len(train_loader), losses.avg, giou_losses.avg, reg_losses.avg,
+                alpha_losses.avg, 100.0 * avg_active.avg, avg_accu50.avg, avg_accu25.avg, avg_iou.avg, avg_center.avg)
+            print(message, flush=True)
+            logging.info(message)
+
+
 def train_epoch(train_loader, model, optimizer, epoch, args):
     batch_time = AverageMeter()
     avg_losses = AverageMeter()
@@ -1394,8 +1534,12 @@ def test_epoch(data_loader, model, args):
                                                'h2_ind_amhcsfi_res_bi_qcc_full'):
                 attach_qcc_rank_logit(model, prediction_output, anchors_full, args)
             if is_ms_detection_variant(args):
-                _, _, _, _, final_box, diagnostics = _ms_predictions_and_loss(
-                    prediction_output, ori_gt_bbox, anchors_full, args, include_loss=False)
+                if args.acr_head:
+                    final_box, _, _, diagnostics = decode_acr_predictions(
+                        model, prediction_output, anchors_full, args)
+                else:
+                    _, _, _, _, final_box, diagnostics = _ms_predictions_and_loss(
+                        prediction_output, ori_gt_bbox, anchors_full, args, include_loss=False)
                 accu50, accu25, iou, accu_center = eval_decoded_boxes(final_box, ori_gt_bbox, args.img_size)
                 accu_list = [accu50, accu25]
                 for name, value in diagnostics.items():

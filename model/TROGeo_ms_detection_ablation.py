@@ -12,6 +12,7 @@ from .dg_position_embedding import DGPositionEmbedding, DDGPositionEmbedding, RD
 from .trogeo_attention import CrossAttention, SpatialTransformer
 from .vit_multistage import TiledViTMultiStageEncoder
 from .habr_former import HABRFormer
+from .acr_head import ACRRefinementHead
 
 
 def build_directional_geometry(distance_map):
@@ -592,7 +593,7 @@ class TROGeoMSDetectionAblation(nn.Module):
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current', dadpe_mode='none',
                  amr_pe_mode='none', gaussian_sigma=25.0,
-                 enable_hqs=False, enable_hqs_v2a=False, enable_hqs_v2b=False):
+                 enable_hqs=False, enable_hqs_v2a=False, enable_hqs_v2b=False, enable_acr=False):
         super().__init__()
         if (emb_size != 768 or backbone not in ('swin_t', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
                 or position_mode not in ('current', 'detgeo', 'dg', 'ddg', 'rdg')):
@@ -621,10 +622,14 @@ class TROGeoMSDetectionAblation(nn.Module):
         self.enable_hqs = bool(enable_hqs)
         self.enable_hqs_v2a = bool(enable_hqs_v2a)
         self.enable_hqs_v2b = bool(enable_hqs_v2b)
+        self.enable_acr = bool(enable_acr)
         if sum((self.enable_hqs, self.enable_hqs_v2a, self.enable_hqs_v2b)) > 1:
             raise ValueError('HQS-v1/v2a/v2b are mutually exclusive')
         if (self.enable_hqs or self.enable_hqs_v2a or self.enable_hqs_v2b) and variant != 'h2_ind_fg_amhcsfi_res':
             raise ValueError('HQS requires h2_ind_fg_amhcsfi_res')
+        if self.enable_acr and (variant != 'h2_ind_amhcsfi_res_bi' or position_mode != 'detgeo'
+                                or backbone != 'swin_t' or dadpe_mode != 'none' or amr_pe_mode != 'none'):
+            raise ValueError('ACR requires Bi-Res, DetGeo PE, Swin-T, and dadpe/amr=none')
         self.three_scale = variant in self.THREE_SCALE_VARIANTS
         # q2 is exposed only to construct the propagated LE gate; detection
         # remains strictly two-scale for this variant.
@@ -807,6 +812,10 @@ class TROGeoMSDetectionAblation(nn.Module):
         # to the DetGeo-PE baseline while naturally advancing later RNG state.
         if self.amr_pe_mode != 'none':
             self.amr_position_field = AdaptiveMultiRangePositionField(mode=self.amr_pe_mode)
+        # Deliberately ordinary --standard_rng: ACR initialization consumes
+        # RNG naturally; no module-local RNG save/restore is used.
+        if self.enable_acr:
+            self.acr_refiner = ACRRefinementHead(channels=384, hidden_dim=128, roi_size=5, num_heads=4)
         # v1 follows ordinary standard RNG; v2a pads/restores only to reproduce
         # v1's exact post-construction RNG state for the controlled comparison.
         if self.enable_hqs:
@@ -1112,6 +1121,11 @@ class TROGeoMSDetectionAblation(nn.Module):
             self._expect('H p3', p3, 45, 64, 64)
             self._expect('H p4', p4, 45, 64, 64)
             predictions = {'stage3': p3, 'stage4': p4}
+            if self.enable_acr:
+                # Features are inputs to the trainable ACR head only.  The
+                # completed Bi-Res detector is never part of its autograd graph.
+                predictions['acr_feature3'] = z3.detach()
+                predictions['acr_feature4'] = aligned4.detach()
             if self.variant in self.QCC_VARIANTS:
                 q3_logits = self.qcc_quality_head_stage3(z3)
                 q4_logits = self.qcc_quality_head_stage4(aligned4)
