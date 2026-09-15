@@ -3,7 +3,7 @@
 import argparse
 import torch
 
-from model.dg_position_embedding import DGPositionEmbedding, RDGPositionEmbedding, recover_gaussian_geometry
+from model.dg_position_embedding import DGPositionEmbedding, DDGPositionEmbedding, RDGPositionEmbedding, recover_gaussian_geometry
 
 
 def gaussian(batch, height, width, sigma, device):
@@ -34,10 +34,21 @@ def check(module_type, device):
         module_type.__name__, tuple(output.shape), error, grad.abs().mean().item()))
 
 
+def check_ddg_parameter_delta():
+    dg = DGPositionEmbedding()
+    ddg = DDGPositionEmbedding()
+    dg_params = sum(parameter.numel() for parameter in dg.parameters())
+    ddg_params = sum(parameter.numel() for parameter in ddg.parameters())
+    assert ddg_params - dg_params == 144, (dg_params, ddg_params)
+    print('DG params={} DDG params={} delta={}'.format(dg_params, ddg_params, ddg_params - dg_params))
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--cuda', action='store_true')
     args = parser.parse_args()
     device = torch.device('cuda' if args.cuda else 'cpu')
     check(DGPositionEmbedding, device)
+    check(DDGPositionEmbedding, device)
     check(RDGPositionEmbedding, device)
+    check_ddg_parameter_delta()

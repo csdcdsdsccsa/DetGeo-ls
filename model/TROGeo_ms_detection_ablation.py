@@ -8,7 +8,7 @@ import torchvision.models as models
 from .TROGeo_ms_direct_ca_sh import SwinTMultiStageEncoder
 from .TROGeo_wo_ost import double_conv
 from .detgeo_position_embedding import DetGeoPositionEmbedding
-from .dg_position_embedding import DGPositionEmbedding, RDGPositionEmbedding
+from .dg_position_embedding import DGPositionEmbedding, DDGPositionEmbedding, RDGPositionEmbedding
 from .trogeo_attention import CrossAttention, SpatialTransformer
 from .vit_multistage import TiledViTMultiStageEncoder
 from .habr_former import HABRFormer
@@ -594,7 +594,7 @@ class TROGeoMSDetectionAblation(nn.Module):
                  enable_hqs=False, enable_hqs_v2a=False, enable_hqs_v2b=False):
         super().__init__()
         if (emb_size != 768 or backbone not in ('swin_t', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
-                or position_mode not in ('current', 'detgeo', 'dg', 'rdg')):
+                or position_mode not in ('current', 'detgeo', 'dg', 'ddg', 'rdg')):
             raise ValueError('requires emb_size=768, a supported backbone, and a valid MS variant')
         if backbone in ('vit_t', 'vit_s') and variant != 'h2_ind':
             raise ValueError('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
@@ -608,10 +608,10 @@ class TROGeoMSDetectionAblation(nn.Module):
         if amr_pe_mode != 'none' and (variant != 'h2_ind_amhcsfi_res_bi' or position_mode != 'detgeo'
                                       or backbone != 'swin_t' or dadpe_mode != 'none'):
             raise ValueError('AMR-PE requires Bi-Res, original DetGeo PE, Swin-T, and dadpe_mode=none')
-        if position_mode in ('dg', 'rdg') and (variant != 'h2_ind_amhcsfi_res_bi' or backbone != 'swin_t'
+        if position_mode in ('dg', 'ddg', 'rdg') and (variant != 'h2_ind_amhcsfi_res_bi' or backbone != 'swin_t'
                                                 or dadpe_mode != 'none' or amr_pe_mode != 'none'
                                                 or gaussian_sigma <= 0):
-            raise ValueError('DG/RDG-PE requires Bi-Res, Swin-T, dadpe/amr=none, and positive Gaussian sigma')
+            raise ValueError('DG/DDG/RDG-PE requires Bi-Res, Swin-T, dadpe/amr=none, and positive Gaussian sigma')
         self.variant = variant
         self.position_mode = position_mode
         self.backbone_name = backbone
@@ -639,8 +639,12 @@ class TROGeoMSDetectionAblation(nn.Module):
             self.position_embedding = DetGeoPositionEmbedding()
         elif position_mode == 'dg':
             self.position_embedding = DGPositionEmbedding(gaussian_sigma=gaussian_sigma)
-        else:
+        elif position_mode == 'ddg':
+            self.position_embedding = DDGPositionEmbedding(gaussian_sigma=gaussian_sigma)
+        elif position_mode == 'rdg':
             self.position_embedding = RDGPositionEmbedding(gaussian_sigma=gaussian_sigma)
+        else:
+            raise ValueError('unsupported position_mode: {}'.format(position_mode))
         if self.three_scale:
             self.cvopm_stage2 = SpatialTransformer(192, 3, 64, depth=1, context_dim=192,
                                                     use_self_attention=False, query_chunk_size=512)
@@ -1175,12 +1179,16 @@ class TROGeoMSDetectionAblation(nn.Module):
                               self.amr_pe_mode, self.amr_position_field.gamma.item(), amr_alpha.item(),
                               mean_weights[0].item(), mean_weights[1].item(), mean_weights[2].item(),
                               amr_identity_error.item()), flush=True)
-                if self.position_mode in ('dg', 'rdg'):
+                if self.position_mode in ('dg', 'ddg', 'rdg'):
                     diagnostics = self.position_embedding.last_diagnostics
                     message = '[{}-PE sanity] delta_abs_mean={{:.8f}} alpha={{:.6f}} identity_error={{:.8f}}'.format(
                         self.position_mode.upper())
                     values = [diagnostics['delta_abs_mean'].item(), diagnostics['alpha'].item(),
                               diagnostics['identity_error'].item()]
+                    if self.position_mode == 'ddg':
+                        message += ' G_abs={:.6f} Gx_abs={:.6f} Gy_abs={:.6f} Gr_abs={:.6f}'
+                        values.extend([diagnostics['g_abs_mean'].item(), diagnostics['gx_abs_mean'].item(),
+                                       diagnostics['gy_abs_mean'].item(), diagnostics['gr_abs_mean'].item()])
                     if self.position_mode == 'rdg':
                         message += ' selector_mean={:.6f}'
                         values.append(diagnostics['selector_mean'].item())

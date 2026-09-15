@@ -71,6 +71,45 @@ class DGPositionEmbedding(nn.Module):
         return output
 
 
+class DDGPositionEmbedding(nn.Module):
+    """DetGeo PE plus the DG residual extended only by radial term ``Gr``.
+
+    This deliberately uses the exact DG single-branch layout.  The sole
+    architectural difference is the 4-channel ``[G, Gx, Gy, Gr]`` input.
+    """
+
+    def __init__(self, gaussian_sigma=25.0):
+        super().__init__()
+        self.gaussian_sigma = float(gaussian_sigma)
+        self.base_encoder = DetGeoPositionEmbedding()
+        self.geometry_encoder = _residual_encoder(4)
+        self.output_projection = nn.Conv2d(16, 3, kernel_size=3, padding=1)
+        nn.init.zeros_(self.output_projection.weight)
+        nn.init.zeros_(self.output_projection.bias)
+        self.alpha = nn.Parameter(torch.tensor(0.1))
+        self.last_diagnostics = {}
+
+    def forward(self, inputs):
+        if inputs.dim() != 4 or inputs.shape[1] != 4:
+            raise RuntimeError('DDG-PE expects [B,4,H,W], got {}'.format(tuple(inputs.shape)))
+        base = self.base_encoder(inputs)
+        g, gx, gy, gr = recover_gaussian_geometry(inputs[:, 3], self.gaussian_sigma)
+        geometry = torch.stack((g, gx, gy, gr), dim=1)
+        delta = self.output_projection(self.geometry_encoder(geometry))
+        output = base + torch.tanh(self.alpha) * delta
+        self.last_diagnostics = {
+            'geometry_shape': tuple(geometry.shape),
+            'g_abs_mean': g.detach().abs().mean(),
+            'gx_abs_mean': gx.detach().abs().mean(),
+            'gy_abs_mean': gy.detach().abs().mean(),
+            'gr_abs_mean': gr.detach().abs().mean(),
+            'delta_abs_mean': delta.detach().abs().mean(),
+            'alpha': torch.tanh(self.alpha.detach()),
+            'identity_error': (output.detach() - base.detach()).abs().max(),
+        }
+        return output
+
+
 class RDGPositionEmbedding(nn.Module):
     """DetGeo PE plus radial/directional geometry residual fusion."""
 
