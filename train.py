@@ -203,7 +203,7 @@ def main():
                         help='shared ImageNet backbone for TROGeo modes')
     parser.add_argument('--trogeo_aug_mode', choices=('current', 'detgeo'), default='current',
                         help='TROGeo train augmentation: current or original DetGeo RSDataset recipe')
-    parser.add_argument('--trogeo_position_mode', choices=('current', 'detgeo'), default='current',
+    parser.add_argument('--trogeo_position_mode', choices=('current', 'detgeo', 'dg', 'rdg'), default='current',
                         help='TROGeo click-position encoder: current double-conv or original DetGeo Conv-BN-Leaky')
     parser.add_argument('--trogeo_click_map_mode', choices=('distance', 'gaussian'), default='distance',
                         help='TROGeo click map: original distance-decay map or fixed Gaussian map')
@@ -329,6 +329,13 @@ def main():
             parser.error('--amr_pe_mode currently requires --trogeo_backbone swin_t')
         if args.dadpe_mode != 'none':
             parser.error('--amr_pe_mode requires --dadpe_mode none for a front-end-only ablation')
+    if args.trogeo_position_mode in ('dg', 'rdg'):
+        if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi' or args.trogeo_backbone != 'swin_t':
+            parser.error('DG/RDG-PE requires Bi-Res h2_ind_amhcsfi_res_bi with Swin-T')
+        if args.trogeo_click_map_mode != 'gaussian' or args.gaussian_sigma <= 0.0:
+            parser.error('DG/RDG-PE requires --trogeo_click_map_mode gaussian and positive --gaussian_sigma')
+        if args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
+            parser.error('DG/RDG-PE requires --dadpe_mode none and --amr_pe_mode none')
     if args.bbox_threshold_reg:
         if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
             parser.error('--bbox_threshold_reg is restricted to Bi-Res h2_ind_amhcsfi_res_bi')
@@ -534,6 +541,7 @@ def main():
                                            variant=args.trogeo_ms_det_variant,
                                            position_mode=args.trogeo_position_mode,
                                            dadpe_mode=args.dadpe_mode, amr_pe_mode=args.amr_pe_mode,
+                                           gaussian_sigma=args.gaussian_sigma,
                                            enable_hqs=args.hqs_v1,
                                            enable_hqs_v2a=args.hqs_v2a, enable_hqs_v2b=args.hqs_v2b)
     elif args.backbone_exp != 'baseline':
