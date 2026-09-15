@@ -199,6 +199,9 @@ def main():
     parser.add_argument('--rccd_ramp_epochs', default=3, type=int, help='RCCD ramp epochs before full weight')
     parser.add_argument('--h3_iou_threshold', default=0.5, type=float,
                         help='H3: fuse two Top-1 boxes only when their pair IoU reaches this threshold')
+    parser.add_argument('--agreement_fusion_decode', action='store_true',
+                        help='inference-only two-head agreement fusion: pair IoU >= h3_iou_threshold uses '
+                             'score-weighted box fusion; otherwise retain score competition')
     parser.add_argument('--trogeo_backbone', choices=('swin_s', 'swin_t', 'resnet50', 'vit_t', 'vit_s'), default='swin_s',
                         help='shared ImageNet backbone for TROGeo modes')
     parser.add_argument('--trogeo_aug_mode', choices=('current', 'detgeo'), default='current',
@@ -351,6 +354,14 @@ def main():
             parser.error('threshold-regularization weights must be >= 0')
         if args.bbox_threshold_temperature <= 0.0:
             parser.error('--bbox_threshold_temperature must be > 0')
+    if args.agreement_fusion_decode:
+        if not (args.val or args.test):
+            parser.error('--agreement_fusion_decode is inference-only; use --val or --test')
+        if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
+            parser.error('--agreement_fusion_decode requires --trogeo_ms_det_variant h2_ind_amhcsfi_res_bi')
+        if not args.bbox_threshold_reg:
+            parser.error('--agreement_fusion_decode is reserved for Threshold-Reg checkpoint evaluation; '
+                         'also pass --bbox_threshold_reg')
     if args.hqs_oracle_diag:
         if args.trogeo_ms_det_variant not in ('h2_ind_fg_amhcsfi_res', 'h2_ind_amhcsfi_res_bi'):
             parser.error('--hqs_oracle_diag is restricted to '
@@ -935,9 +946,10 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
             final_box, diagnostics = select_two_heads_hqs(
                 p3, p4, predictions['hqs_logits'], anchors_full, args.img_size)
         else:
+            agreement_fusion = variant in ('h3_ind', 'h3_adaptive') or args.agreement_fusion_decode
             final_box, diagnostics = select_two_heads(
                 p3, p4, anchors_full, args.img_size,
-                fusion=variant in ('h3_ind', 'h3_adaptive'),
+                fusion=agreement_fusion,
                 iou_threshold=args.h3_iou_threshold,
                 adaptive=(variant == 'h3_adaptive'))
     return loss_geo, loss_cls, loss_aux, qcc_losses, final_box, diagnostics
