@@ -567,6 +567,14 @@ class TROGeoMSDetectionAblation(nn.Module):
     # this sibling changes only the final detector from two heads to an
     # adaptive Stage-3/4 fused single head.
     AMHCSFI_RES_BI_SINGLE_VARIANTS = ('h2_ind_amhcsfi_res_bi_afuse',)
+    # Strict Bi-Res output ablations.  Their entire encoder, bidirectional
+    # guidance and AMHCSFI-Res path is identical to Bi-Res; only the final
+    # prediction feature / detector differs.
+    BIRES_OUTPUT_S3_VARIANTS = ('h2_ind_amhcsfi_res_bi_s3only',)
+    BIRES_OUTPUT_S4_VARIANTS = ('h2_ind_amhcsfi_res_bi_s4only',)
+    BIRES_OUTPUT_CONCAT_VARIANTS = ('h2_ind_amhcsfi_res_bi_concat',)
+    BIRES_OUTPUT_SINGLE_VARIANTS = (BIRES_OUTPUT_S3_VARIANTS + BIRES_OUTPUT_S4_VARIANTS +
+                                    BIRES_OUTPUT_CONCAT_VARIANTS)
     AFUSE_B1_VARIANTS = ('h2_ind_bires_afuse_b1',)
     AFUSE_B0_VARIANTS = ('h2_ind_corr_afuse_b0',)
     AFUSE_NEW_VARIANTS = AFUSE_B1_VARIANTS + AFUSE_B0_VARIANTS
@@ -575,6 +583,7 @@ class TROGeoMSDetectionAblation(nn.Module):
     AMHCSFI_RES_GUIDE_VARIANTS = ('h2_ind_cg_amhcsfi_res', 'h2_ind_fg_amhcsfi_res') + \
                                   FG_AMHCSFI_RES_SINGLE_VARIANTS
     AMHCSFI_RES_VARIANTS = (AMHCSFI_RES_BI_VARIANTS + AMHCSFI_RES_BI_SINGLE_VARIANTS +
+                            BIRES_OUTPUT_SINGLE_VARIANTS +
                             AMHCSFI_RES_GUIDE_VARIANTS)
     ADAPTIVE_CSFI_CHANNEL_VARIANTS = ('h2_ind_csfi_cg_channel', 'h2_ind_csfi_cg_ar')
     ADAPTIVE_CSFI_DIRECTION_VARIANTS = ('h2_ind_csfi_cg_dir', 'h2_ind_csfi_cg_ar')
@@ -588,13 +597,13 @@ class TROGeoMSDetectionAblation(nn.Module):
         'h2_ind_csfi_fg', 'h2_ind_csfi_bi') + AMHCSFI_RES_VARIANTS
     COARSE_GUIDE_VARIANTS = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier', 'h2_ind_csfi_bi',
                              'h2_ind_bi_nocsfi', 'h2_ind_cg_amhcsfi_res') + MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS + AMHCSFI_RES_BI_SINGLE_VARIANTS + CG_HABR_PRIOR_VARIANTS + \
-                            ADAPTIVE_CSFI_VARIANTS + AFUSE_B1_VARIANTS
+                            ADAPTIVE_CSFI_VARIANTS + AFUSE_B1_VARIANTS + BIRES_OUTPUT_SINGLE_VARIANTS
     FINE_GUIDE_VARIANTS = ('h2_ind_csfi_fg', 'h2_ind_csfi_bi', 'h2_ind_fg_nocsfi', 'h2_ind_bi_nocsfi',
                            'h2_ind_fg_amhcsfi_res') + FG_AMHCSFI_RES_SINGLE_VARIANTS + \
-                          MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS + AMHCSFI_RES_BI_SINGLE_VARIANTS + AFUSE_B1_VARIANTS
+                          MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS + AMHCSFI_RES_BI_SINGLE_VARIANTS + AFUSE_B1_VARIANTS + BIRES_OUTPUT_SINGLE_VARIANTS
     FINE_ONLY_GUIDE_VARIANTS = ('h2_ind_csfi_fg', 'h2_ind_fg_nocsfi', 'h2_ind_fg_amhcsfi_res') + \
                                FG_AMHCSFI_RES_SINGLE_VARIANTS
-    BIDIR_GUIDE_VARIANTS = ('h2_ind_csfi_bi', 'h2_ind_bi_nocsfi') + MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS + AMHCSFI_RES_BI_SINGLE_VARIANTS + AFUSE_B1_VARIANTS
+    BIDIR_GUIDE_VARIANTS = ('h2_ind_csfi_bi', 'h2_ind_bi_nocsfi') + MHCSFI_VARIANTS + AMHCSFI_RES_BI_VARIANTS + AMHCSFI_RES_BI_SINGLE_VARIANTS + AFUSE_B1_VARIANTS + BIRES_OUTPUT_SINGLE_VARIANTS
     HABR_VARIANTS = ('h2_ind_habr_core', 'h2_ind_habr_prior', 'h2_ind_habr_adapt', 'h2_ind_habr') + \
                     CG_HABR_PRIOR_VARIANTS
     HABR_MODE = {
@@ -690,6 +699,20 @@ class TROGeoMSDetectionAblation(nn.Module):
                 nn.Conv2d(768, 384, kernel_size=1), nn.ReLU(inplace=True),
             )
             self.det_head_stage4 = nn.Conv2d(384, 15, kernel_size=1)
+        elif variant in self.BIRES_OUTPUT_S3_VARIANTS:
+            self.det_head_single = nn.Conv2d(384, 45, kernel_size=1)
+        elif variant in self.BIRES_OUTPUT_S4_VARIANTS:
+            self.stage4_align = nn.Sequential(
+                nn.ConvTranspose2d(768, 384, kernel_size=4, stride=2, padding=1),
+                nn.ReLU(inplace=True),
+            )
+            self.det_head_single = nn.Conv2d(384, 45, kernel_size=1)
+        elif variant in self.BIRES_OUTPUT_CONCAT_VARIANTS:
+            self.stage4_align = nn.Sequential(
+                nn.ConvTranspose2d(768, 384, kernel_size=4, stride=2, padding=1),
+                nn.ReLU(inplace=True),
+            )
+            self.det_head_single = nn.Conv2d(768, 45, kernel_size=1)
         else:
             self.stage4_align = nn.Sequential(
                 nn.ConvTranspose2d(768, 384, kernel_size=4, stride=2, padding=1),
@@ -1099,6 +1122,24 @@ class TROGeoMSDetectionAblation(nn.Module):
             self._expect('E2 p3', p3, 30, 64, 64)
             self._expect('E2 p4', p4, 15, 32, 32)
             predictions = {'stage3': p3, 'stage4': p4}
+        elif self.variant in self.BIRES_OUTPUT_S3_VARIANTS:
+            p = self.det_head_single(z3)
+            self._expect('Bi-Res Stage3-only single head', p, 45, 64, 64)
+            predictions = {'single': p, 'coarse_logits': coarse_logits, 'fine_logits': fine_logits}
+        elif self.variant in self.BIRES_OUTPUT_S4_VARIANTS:
+            aligned4 = self.stage4_align(z4)
+            self._expect('Bi-Res Stage4 aligned feature', aligned4, 384, 64, 64)
+            p = self.det_head_single(aligned4)
+            self._expect('Bi-Res Stage4-only single head', p, 45, 64, 64)
+            predictions = {'single': p, 'coarse_logits': coarse_logits, 'fine_logits': fine_logits}
+        elif self.variant in self.BIRES_OUTPUT_CONCAT_VARIANTS:
+            aligned4 = self.stage4_align(z4)
+            self._expect('Bi-Res Concat aligned Stage4', aligned4, 384, 64, 64)
+            concat_feature = torch.cat((z3, aligned4), dim=1)
+            self._expect('Bi-Res Concat feature', concat_feature, 768, 64, 64)
+            p = self.det_head_single(concat_feature)
+            self._expect('Bi-Res Concat single head', p, 45, 64, 64)
+            predictions = {'single': p, 'coarse_logits': coarse_logits, 'fine_logits': fine_logits}
         elif self.variant in self.FG_AMHCSFI_RES_SINGLE_VARIANTS:
             aligned4 = self.stage4_align(z4)
             fusion_weights = None

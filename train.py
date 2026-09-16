@@ -158,6 +158,7 @@ def main():
         'h2_ind_cg_habr_prior',
         'h2_ind_csfi_fg', 'h2_ind_csfi_bi', 'h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi', 'h2_ind_amhcsfi_res_bi',
         'h2_ind_amhcsfi_res_bi_afuse', 'h2_ind_bires_afuse_b1', 'h2_ind_corr_afuse_b0',
+        'h2_ind_amhcsfi_res_bi_s3only', 'h2_ind_amhcsfi_res_bi_s4only', 'h2_ind_amhcsfi_res_bi_concat',
         'h2_ind_amhcsfi_res_bi_qcc_a', 'h2_ind_amhcsfi_res_bi_qcc_af', 'h2_ind_amhcsfi_res_bi_qcc_b',
         'h2_ind_amhcsfi_res_bi_qcc_full',
         'h2_ind_cg_amhcsfi_res', 'h2_ind_fg_amhcsfi_res',
@@ -834,6 +835,9 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
     fg_amhcsfi_single_variants = (
         'h2_ind_fg_amhcsfi_res_s3', 'h2_ind_fg_amhcsfi_res_s4', 'h2_ind_fg_amhcsfi_res_afuse')
     bi_afuse_guided_single_variants = ('h2_ind_amhcsfi_res_bi_afuse', 'h2_ind_bires_afuse_b1')
+    bires_output_single_variants = (
+        'h2_ind_amhcsfi_res_bi_s3only', 'h2_ind_amhcsfi_res_bi_s4only',
+        'h2_ind_amhcsfi_res_bi_concat')
     corr_afuse_b0_variants = ('h2_ind_corr_afuse_b0',)
     qcc_a_variants = ('h2_ind_amhcsfi_res_bi_qcc_a',)
     qcc_af_variants = ('h2_ind_amhcsfi_res_bi_qcc_af',)
@@ -908,6 +912,20 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
             'fusion_w3': predictions['fusion_weights'][:, 0].mean(),
             'fusion_w4': predictions['fusion_weights'][:, 1].mean(),
         }
+    elif variant in bires_output_single_variants:
+        p = predictions['single'].view(predictions['single'].shape[0], 9, 5, 64, 64)
+        target, best = build_target(ori_gt_bbox, anchors_full, args.img_size, 64)
+        if include_loss:
+            loss_geo, loss_cls = yolo_loss(p, target, anchors_full, best, args.img_size)
+            loss_coarse = coarse_heatmap_loss(predictions['coarse_logits'], ori_gt_bbox,
+                                              args.img_size, args.coarse_sigma)
+            loss_fine = coarse_heatmap_loss(predictions['fine_logits'], ori_gt_bbox,
+                                            args.img_size, args.fine_sigma)
+            loss_aux = 0.5 * (loss_coarse + loss_fine)
+        else:
+            loss_geo = loss_cls = None
+        final_box, _ = decode_top1(p, anchors_full, args.img_size)
+        diagnostics = {}
     elif variant in corr_afuse_b0_variants:
         p = predictions['single'].view(predictions['single'].shape[0], 9, 5, 64, 64)
         target, best = build_target(ori_gt_bbox, anchors_full, args.img_size, 64)
