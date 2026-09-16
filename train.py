@@ -159,6 +159,7 @@ def main():
         'h2_ind_csfi_fg', 'h2_ind_csfi_bi', 'h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi', 'h2_ind_amhcsfi_res_bi',
         'h2_ind_amhcsfi_res_bi_afuse', 'h2_ind_bires_afuse_b1', 'h2_ind_corr_afuse_b0',
         'h2_ind_amhcsfi_res_bi_s3only', 'h2_ind_amhcsfi_res_bi_s4only', 'h2_ind_amhcsfi_res_bi_concat',
+        'h2_ind_bi_nocsfi_concat',
         'h2_ind_amhcsfi_res_bi_qcc_a', 'h2_ind_amhcsfi_res_bi_qcc_af', 'h2_ind_amhcsfi_res_bi_qcc_b',
         'h2_ind_amhcsfi_res_bi_qcc_full',
         'h2_ind_cg_amhcsfi_res', 'h2_ind_fg_amhcsfi_res',
@@ -878,7 +879,7 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
     bi_afuse_guided_single_variants = ('h2_ind_amhcsfi_res_bi_afuse', 'h2_ind_bires_afuse_b1')
     bires_output_single_variants = (
         'h2_ind_amhcsfi_res_bi_s3only', 'h2_ind_amhcsfi_res_bi_s4only',
-        'h2_ind_amhcsfi_res_bi_concat')
+        'h2_ind_amhcsfi_res_bi_concat', 'h2_ind_bi_nocsfi_concat')
     corr_afuse_b0_variants = ('h2_ind_corr_afuse_b0',)
     qcc_a_variants = ('h2_ind_amhcsfi_res_bi_qcc_a',)
     qcc_af_variants = ('h2_ind_amhcsfi_res_bi_qcc_af',)

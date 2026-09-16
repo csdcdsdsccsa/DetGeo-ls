@@ -567,14 +567,19 @@ class TROGeoMSDetectionAblation(nn.Module):
     # this sibling changes only the final detector from two heads to an
     # adaptive Stage-3/4 fused single head.
     AMHCSFI_RES_BI_SINGLE_VARIANTS = ('h2_ind_amhcsfi_res_bi_afuse',)
-    # Strict Bi-Res output ablations.  Their entire encoder, bidirectional
-    # guidance and AMHCSFI-Res path is identical to Bi-Res; only the final
-    # prediction feature / detector differs.
+    # Strict Bi-Res output ablations.  The three AMHCSFI variants retain the
+    # residual cross-scale refiner.  The NoCSFI concat sibling deliberately
+    # stops after bidirectional guidance, so it can isolate that refiner.
     BIRES_OUTPUT_S3_VARIANTS = ('h2_ind_amhcsfi_res_bi_s3only',)
     BIRES_OUTPUT_S4_VARIANTS = ('h2_ind_amhcsfi_res_bi_s4only',)
-    BIRES_OUTPUT_CONCAT_VARIANTS = ('h2_ind_amhcsfi_res_bi_concat',)
-    BIRES_OUTPUT_SINGLE_VARIANTS = (BIRES_OUTPUT_S3_VARIANTS + BIRES_OUTPUT_S4_VARIANTS +
-                                    BIRES_OUTPUT_CONCAT_VARIANTS)
+    BIRES_OUTPUT_CONCAT_AMHCSFI_VARIANTS = ('h2_ind_amhcsfi_res_bi_concat',)
+    BIRES_OUTPUT_CONCAT_NOCSFI_VARIANTS = ('h2_ind_bi_nocsfi_concat',)
+    BIRES_OUTPUT_CONCAT_VARIANTS = (BIRES_OUTPUT_CONCAT_AMHCSFI_VARIANTS +
+                                    BIRES_OUTPUT_CONCAT_NOCSFI_VARIANTS)
+    BIRES_OUTPUT_AMHCSFI_SINGLE_VARIANTS = (BIRES_OUTPUT_S3_VARIANTS + BIRES_OUTPUT_S4_VARIANTS +
+                                            BIRES_OUTPUT_CONCAT_AMHCSFI_VARIANTS)
+    BIRES_OUTPUT_SINGLE_VARIANTS = (BIRES_OUTPUT_AMHCSFI_SINGLE_VARIANTS +
+                                    BIRES_OUTPUT_CONCAT_NOCSFI_VARIANTS)
     AFUSE_B1_VARIANTS = ('h2_ind_bires_afuse_b1',)
     AFUSE_B0_VARIANTS = ('h2_ind_corr_afuse_b0',)
     AFUSE_NEW_VARIANTS = AFUSE_B1_VARIANTS + AFUSE_B0_VARIANTS
@@ -583,11 +588,12 @@ class TROGeoMSDetectionAblation(nn.Module):
     AMHCSFI_RES_GUIDE_VARIANTS = ('h2_ind_cg_amhcsfi_res', 'h2_ind_fg_amhcsfi_res') + \
                                   FG_AMHCSFI_RES_SINGLE_VARIANTS
     AMHCSFI_RES_VARIANTS = (AMHCSFI_RES_BI_VARIANTS + AMHCSFI_RES_BI_SINGLE_VARIANTS +
-                            BIRES_OUTPUT_SINGLE_VARIANTS +
+                            BIRES_OUTPUT_AMHCSFI_SINGLE_VARIANTS +
                             AMHCSFI_RES_GUIDE_VARIANTS)
     ADAPTIVE_CSFI_CHANNEL_VARIANTS = ('h2_ind_csfi_cg_channel', 'h2_ind_csfi_cg_ar')
     ADAPTIVE_CSFI_DIRECTION_VARIANTS = ('h2_ind_csfi_cg_dir', 'h2_ind_csfi_cg_ar')
-    NO_CSFI_GUIDE_VARIANTS = ('h2_ind_fg_nocsfi', 'h2_ind_bi_nocsfi')
+    NO_CSFI_GUIDE_VARIANTS = ('h2_ind_fg_nocsfi', 'h2_ind_bi_nocsfi') + \
+                              BIRES_OUTPUT_CONCAT_NOCSFI_VARIANTS
     DADPE_SUPPORTED_VARIANTS = ('h2_ind_csfi_bi', 'h2_ind_fg_amhcsfi_res', 'h2_ind_amhcsfi_res_bi')
     CG_HABR_PRIOR_VARIANTS = ('h2_ind_cg_habr_prior',)
     TWO_SCALE_COLLAB_VARIANTS = (TWO_SCALE_COLLAB_VARIANTS + ADAPTIVE_CSFI_VARIANTS + MHCSFI_VARIANTS + AMHCSFI_RES_VARIANTS +
