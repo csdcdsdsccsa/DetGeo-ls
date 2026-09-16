@@ -48,7 +48,7 @@ from model.multiscale_detection_loss import (multigrid_yolo_loss, two_head_yolo_
                                              three_head_yolo_loss_stage2_cls_half, coarse_heatmap_loss,
                                              rccd_consensus_loss, two_head_yolo_threshold_reg_loss)
 from utils.utils import AverageMeter, eval_iou_acc, bbox_iou
-from utils.multiscale_detection import (decode_multigrid_top1, decode_top1, select_two_heads, select_two_heads_hqs,
+from utils.multiscale_detection import (decode_multigrid_top1, decode_top1, select_two_heads, select_two_heads_wprf, select_two_heads_hqs,
                                         select_two_heads_hqs_v2a, select_three_heads,
                                         eval_decoded_boxes, analyze_two_head_oracle, build_qcc_state,
                                         select_qcc_a, select_qcc_af, select_qcc_ranked)
@@ -204,6 +204,22 @@ def main():
     parser.add_argument('--agreement_fusion_decode', action='store_true',
                         help='inference-only two-head agreement fusion: pair IoU >= h3_iou_threshold uses '
                              'score-weighted box fusion; otherwise retain score competition')
+    parser.add_argument('--wprf_iou_decode', action='store_true',
+                        help='inference-only WPRF-IoU decoder with winner-preserving residual refinement')
+    parser.add_argument('--wprf_full_decode', action='store_true',
+                        help='inference-only WPRF-Full decoder with IoU, confidence and geometry gates')
+    parser.add_argument('--wprf_alpha_max', default=0.25, type=float,
+                        help='maximum WPRF loser residual contribution')
+    parser.add_argument('--wprf_tau_low', default=0.30, type=float,
+                        help='WPRF IoU lower gate threshold')
+    parser.add_argument('--wprf_tau_high', default=0.70, type=float,
+                        help='WPRF IoU upper gate threshold')
+    parser.add_argument('--wprf_conf_gamma', default=2.0, type=float,
+                        help='WPRF confidence-balance sharpening exponent')
+    parser.add_argument('--wprf_lambda_center', default=1.0, type=float,
+                        help='WPRF normalized center-disagreement penalty')
+    parser.add_argument('--wprf_lambda_scale', default=1.0, type=float,
+                        help='WPRF log scale-disagreement penalty')
     parser.add_argument('--acr_head', action='store_true',
                         help='freeze completed Bi-Res and train only the local ACR refinement head')
     parser.add_argument('--acr_lr', default=1e-3, type=float)
@@ -364,6 +380,10 @@ def main():
             parser.error('threshold-regularization weights must be >= 0')
         if args.bbox_threshold_temperature <= 0.0:
             parser.error('--bbox_threshold_temperature must be > 0')
+    decoder_count = sum((bool(args.agreement_fusion_decode), bool(args.wprf_iou_decode),
+                         bool(args.wprf_full_decode)))
+    if decoder_count > 1:
+        parser.error('--agreement_fusion_decode, --wprf_iou_decode and --wprf_full_decode are mutually exclusive')
     if args.agreement_fusion_decode:
         if not (args.val or args.test):
             parser.error('--agreement_fusion_decode is inference-only; use --val or --test')
@@ -375,6 +395,27 @@ def main():
             parser.error('--agreement_fusion_decode requires --trogeo_click_map_mode distance')
         if args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
             parser.error('--agreement_fusion_decode requires dadpe_mode=none and amr_pe_mode=none')
+    if args.wprf_iou_decode or args.wprf_full_decode:
+        if not (args.val or args.test):
+            parser.error('WPRF is inference-only; use --val or --test')
+        if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
+            parser.error('WPRF requires --trogeo_ms_det_variant h2_ind_amhcsfi_res_bi')
+        if args.trogeo_backbone != 'swin_t' or args.trogeo_position_mode != 'detgeo':
+            parser.error('WPRF requires Swin-T and original DetGeo PE')
+        if args.trogeo_click_map_mode != 'distance':
+            parser.error('WPRF requires --trogeo_click_map_mode distance')
+        if args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
+            parser.error('WPRF requires dadpe_mode=none and amr_pe_mode=none')
+        if args.bbox_threshold_reg:
+            parser.error('WPRF requires the plain Bi-Res checkpoint, not Threshold-Reg')
+    if not 0.0 <= args.wprf_alpha_max <= 0.5:
+        parser.error('--wprf_alpha_max must be in [0,0.5]')
+    if not (0.0 <= args.wprf_tau_low < args.wprf_tau_high <= 1.0):
+        parser.error('require 0 <= wprf_tau_low < wprf_tau_high <= 1')
+    if args.wprf_conf_gamma <= 0.0:
+        parser.error('--wprf_conf_gamma must be > 0')
+    if args.wprf_lambda_center < 0.0 or args.wprf_lambda_scale < 0.0:
+        parser.error('WPRF geometry lambdas must be >= 0')
     if args.acr_head:
         if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
             parser.error('--acr_head requires h2_ind_amhcsfi_res_bi')
@@ -1024,6 +1065,13 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
         elif args.hqs_v1:
             final_box, diagnostics = select_two_heads_hqs(
                 p3, p4, predictions['hqs_logits'], anchors_full, args.img_size)
+        elif args.wprf_iou_decode or args.wprf_full_decode:
+            final_box, diagnostics = select_two_heads_wprf(
+                p3, p4, anchors_full, args.img_size,
+                mode='iou' if args.wprf_iou_decode else 'full',
+                alpha_max=args.wprf_alpha_max, tau_low=args.wprf_tau_low,
+                tau_high=args.wprf_tau_high, conf_gamma=args.wprf_conf_gamma,
+                lambda_center=args.wprf_lambda_center, lambda_scale=args.wprf_lambda_scale)
         else:
             agreement_fusion = variant in ('h3_ind', 'h3_adaptive') or args.agreement_fusion_decode
             final_box, diagnostics = select_two_heads(

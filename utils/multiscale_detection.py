@@ -177,6 +177,87 @@ def select_two_heads(pred3, pred4, anchors, image_wh, fusion=False, iou_threshol
     return selected, diagnostics
 
 
+def select_two_heads_wprf(pred3, pred4, anchors, image_wh, mode='iou', alpha_max=0.25,
+                          tau_low=0.30, tau_high=0.70, conf_gamma=2.0,
+                          lambda_center=1.0, lambda_scale=1.0, eps=1e-6):
+    """Winner-preserving residual fusion for the Bi-Res two-head decoder.
+
+    ``mode='iou'`` uses only continuous cross-head IoU agreement.  ``full``
+    additionally suppresses the loser residual when confidence or geometry
+    agreement is weak.  The original confidence competition always chooses
+    the winner; only its decoded box is refined.
+    """
+    if mode not in ('iou', 'full'):
+        raise ValueError("WPRF mode must be 'iou' or 'full'")
+    if not 0.0 <= float(alpha_max) <= 0.5:
+        raise ValueError('alpha_max must be in [0, 0.5]')
+    if not 0.0 <= float(tau_low) < float(tau_high) <= 1.0:
+        raise ValueError('require 0 <= tau_low < tau_high <= 1')
+    if float(conf_gamma) <= 0.0:
+        raise ValueError('conf_gamma must be > 0')
+    if float(lambda_center) < 0.0 or float(lambda_scale) < 0.0:
+        raise ValueError('geometry lambdas must be >= 0')
+
+    box3, score3 = decode_top1(pred3, anchors, image_wh)
+    box4, score4 = decode_top1(pred4, anchors, image_wh)
+    use3 = score3 >= score4
+    winner = torch.where(use3[:, None], box3, box4)
+    loser = torch.where(use3[:, None], box4, box3)
+
+    pair_iou = bbox_iou(box3, box4, x1y1x2y2=True).clamp(0.0, 1.0)
+    g_iou = ((pair_iou - float(tau_low)) / (float(tau_high) - float(tau_low))).clamp(0.0, 1.0)
+
+    def box_geometry(box):
+        width = (box[:, 2] - box[:, 0]).clamp_min(eps)
+        height = (box[:, 3] - box[:, 1]).clamp_min(eps)
+        center_x = 0.5 * (box[:, 0] + box[:, 2])
+        center_y = 0.5 * (box[:, 1] + box[:, 3])
+        return center_x, center_y, width, height
+
+    c3x, c3y, w3, h3 = box_geometry(box3)
+    c4x, c4y, w4, h4 = box_geometry(box4)
+    balance = (2.0 * torch.minimum(score3, score4) / (score3 + score4 + eps)).clamp(0.0, 1.0)
+    g_conf_full = balance.pow(float(conf_gamma))
+    center_distance = torch.sqrt((c3x - c4x).square() + (c3y - c4y).square() + eps)
+    mean_diag = 0.5 * (torch.sqrt(w3.square() + h3.square() + eps) +
+                       torch.sqrt(w4.square() + h4.square() + eps))
+    d_center = center_distance / (mean_diag + eps)
+    d_scale = 0.5 * (torch.abs(torch.log((w3 + eps) / (w4 + eps))) +
+                     torch.abs(torch.log((h3 + eps) / (h4 + eps))))
+    g_geo_full = torch.exp(-float(lambda_center) * d_center - float(lambda_scale) * d_scale).clamp(0.0, 1.0)
+
+    if mode == 'iou':
+        g_conf = torch.ones_like(g_iou)
+        g_geo = torch.ones_like(g_iou)
+    else:
+        g_conf = g_conf_full
+        g_geo = g_geo_full
+    alpha = (float(alpha_max) * g_iou * g_conf * g_geo).clamp(0.0, float(alpha_max))
+
+    wcx, wcy, ww, wh = box_geometry(winner)
+    lcx, lcy, lw, lh = box_geometry(loser)
+    refined_cx = wcx + alpha * (lcx - wcx)
+    refined_cy = wcy + alpha * (lcy - wcy)
+    refined_w = torch.exp(torch.log(ww + eps) + alpha * (torch.log(lw + eps) - torch.log(ww + eps)))
+    refined_h = torch.exp(torch.log(wh + eps) + alpha * (torch.log(lh + eps) - torch.log(wh + eps)))
+    final_box = torch.stack((refined_cx - 0.5 * refined_w, refined_cy - 0.5 * refined_h,
+                             refined_cx + 0.5 * refined_w, refined_cy + 0.5 * refined_h), dim=1)
+    return final_box, {
+        'stage3_selected': use3.float().mean(),
+        'stage4_selected': (~use3).float().mean(),
+        'pair_iou': pair_iou.mean(),
+        'wprf_g_iou': g_iou.mean(),
+        'wprf_g_conf': g_conf.mean(),
+        'wprf_g_geo': g_geo.mean(),
+        'wprf_alpha': alpha.mean(),
+        'wprf_refined_ratio': (alpha > 1e-8).float().mean(),
+        'wprf_zero_ratio': (alpha <= 1e-8).float().mean(),
+        'wprf_center_distance': d_center.mean(),
+        'wprf_scale_distance': d_scale.mean(),
+        'wprf_conf_balance': balance.mean(),
+    }
+
+
 def select_two_heads_hqs(pred3, pred4, hqs_logits, anchors, image_wh):
     """Select one complete detection head with learned HQS probabilities."""
     box3, _ = decode_top1(pred3, anchors, image_wh)
