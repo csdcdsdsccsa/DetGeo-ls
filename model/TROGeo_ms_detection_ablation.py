@@ -15,6 +15,7 @@ from .habr_former import HABRFormer
 from .acr_head import ACRRefinementHead
 from .hisym_pae_fusion import HiSymPAEFusion
 from .deep_gaussian_residual_pe import DeepGaussianResidualPE
+from .hisym_gaussian_extensions import DGRPEV2, AdaptiveHiSymGPE
 
 
 def build_directional_geometry(distance_map):
@@ -31,19 +32,6 @@ def build_directional_geometry(distance_map):
         x_map = ((cols - click_x.view(batch, 1, 1)) / float(width)).expand(batch, height, width)
         y_map = ((rows - click_y.view(batch, 1, 1)) / float(height)).expand(batch, height, width)
     return torch.stack((distance_map, x_map, y_map), dim=1)
-
-
-def build_frontend_with_detgeo_rng_padding(factory):
-    """Build a replacement front end while retaining DetGeo PE's RNG exit state."""
-    rng_before = torch.get_rng_state()
-    rng_padding = DetGeoPositionEmbedding()
-    rng_after_baseline_pe = torch.get_rng_state()
-    del rng_padding
-    torch.set_rng_state(rng_before)
-    with torch.random.fork_rng(devices=[]):
-        module = factory()
-    torch.set_rng_state(rng_after_baseline_pe)
-    return module
 
 
 def parameter_free_cosine_correlation(query_feature, satellite_feature, eps=1e-6):
@@ -642,7 +630,8 @@ class TROGeoMSDetectionAblation(nn.Module):
                  enable_hqs=False, enable_hqs_v2a=False, enable_hqs_v2b=False, enable_acr=False):
         super().__init__()
         if (emb_size != 768 or backbone not in ('swin_t', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
-                or position_mode not in ('current', 'detgeo', 'dg', 'ddg', 'rdg', 'hisym_pe', 'dgrpe')):
+                or position_mode not in ('current', 'detgeo', 'dg', 'ddg', 'rdg', 'hisym_pe', 'dgrpe',
+                                          'dgrpe_v2', 'hisym_agpe')):
             raise ValueError('requires emb_size=768, a supported backbone, and a valid MS variant')
         if backbone in ('vit_t', 'vit_s') and variant != 'h2_ind':
             raise ValueError('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
@@ -660,11 +649,11 @@ class TROGeoMSDetectionAblation(nn.Module):
                                                 or dadpe_mode != 'none' or amr_pe_mode != 'none'
                                                 or gaussian_sigma <= 0):
             raise ValueError('DG/DDG/RDG-PE requires Bi-Res, Swin-T, dadpe/amr=none, and positive Gaussian sigma')
-        if position_mode in ('hisym_pe', 'dgrpe') and (variant != 'h2_ind_amhcsfi_res_bi' or backbone != 'swin_t'
+        if position_mode in ('hisym_pe', 'dgrpe', 'dgrpe_v2', 'hisym_agpe') and (variant != 'h2_ind_amhcsfi_res_bi' or backbone != 'swin_t'
                                                        or dadpe_mode != 'none' or amr_pe_mode != 'none'):
             raise ValueError('HiSym-PE/DGRPE requires Bi-Res, Swin-T, dadpe=none, and amr=none')
-        if position_mode == 'dgrpe' and gaussian_sigma <= 0:
-            raise ValueError('DGRPE requires positive Gaussian sigma')
+        if position_mode in ('dgrpe', 'dgrpe_v2', 'hisym_agpe') and gaussian_sigma <= 0:
+            raise ValueError('DGRPE/Adaptive HiSym-GPE requires positive Gaussian sigma')
         self.variant = variant
         self.position_mode = position_mode
         self.backbone_name = backbone
@@ -695,9 +684,13 @@ class TROGeoMSDetectionAblation(nn.Module):
         elif position_mode == 'detgeo':
             self.position_embedding = DetGeoPositionEmbedding()
         elif position_mode == 'hisym_pe':
-            self.position_embedding = build_frontend_with_detgeo_rng_padding(HiSymPAEFusion)
+            self.position_embedding = HiSymPAEFusion()
         elif position_mode == 'dgrpe':
-            self.position_embedding = build_frontend_with_detgeo_rng_padding(DeepGaussianResidualPE)
+            self.position_embedding = DeepGaussianResidualPE()
+        elif position_mode == 'dgrpe_v2':
+            self.position_embedding = DGRPEV2()
+        elif position_mode == 'hisym_agpe':
+            self.position_embedding = AdaptiveHiSymGPE(base_sigma=gaussian_sigma)
         elif position_mode == 'dg':
             self.position_embedding = DGPositionEmbedding(gaussian_sigma=gaussian_sigma)
         elif position_mode == 'ddg':
@@ -1032,7 +1025,7 @@ class TROGeoMSDetectionAblation(nn.Module):
         else:
             effective_click_map = click_map
         position_map = effective_click_map.unsqueeze(1)
-        if self.position_mode in ('hisym_pe', 'dgrpe'):
+        if self.position_mode in ('hisym_pe', 'dgrpe', 'dgrpe_v2', 'hisym_agpe'):
             position_feature = self.position_embedding(query_imgs, position_map)
         else:
             position_feature = self.position_embedding(torch.cat((query_imgs, position_map), dim=1))
