@@ -17,6 +17,7 @@ from .hisym_pae_fusion import HiSymPAEFusion
 from .deep_gaussian_residual_pe import DeepGaussianResidualPE
 from .hisym_gaussian_extensions import DGRPEV2, AdaptiveHiSymGPE
 from .hisym_core_ring_gpe import HiSymCoreRingGPE
+from .hisym_directional_gpe import HiSymDirectionalGPE, HiSymDirectionalCoreRingGPE
 
 
 def build_directional_geometry(distance_map):
@@ -632,7 +633,7 @@ class TROGeoMSDetectionAblation(nn.Module):
         super().__init__()
         if (emb_size != 768 or backbone not in ('swin_t', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
                 or position_mode not in ('current', 'detgeo', 'dg', 'ddg', 'rdg', 'hisym_pe', 'dgrpe',
-                                          'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe')):
+                                          'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe')):
             raise ValueError('requires emb_size=768, a supported backbone, and a valid MS variant')
         if backbone in ('vit_t', 'vit_s') and variant != 'h2_ind':
             raise ValueError('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
@@ -650,10 +651,10 @@ class TROGeoMSDetectionAblation(nn.Module):
                                                 or dadpe_mode != 'none' or amr_pe_mode != 'none'
                                                 or gaussian_sigma <= 0):
             raise ValueError('DG/DDG/RDG-PE requires Bi-Res, Swin-T, dadpe/amr=none, and positive Gaussian sigma')
-        if position_mode in ('hisym_pe', 'dgrpe', 'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe') and (variant != 'h2_ind_amhcsfi_res_bi' or backbone != 'swin_t'
+        if position_mode in ('hisym_pe', 'dgrpe', 'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe') and (variant != 'h2_ind_amhcsfi_res_bi' or backbone != 'swin_t'
                                                        or dadpe_mode != 'none' or amr_pe_mode != 'none'):
             raise ValueError('HiSym-PE/DGRPE requires Bi-Res, Swin-T, dadpe=none, and amr=none')
-        if position_mode in ('dgrpe', 'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe') and gaussian_sigma <= 0:
+        if position_mode in ('dgrpe', 'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe') and gaussian_sigma <= 0:
             raise ValueError('DGRPE/Adaptive HiSym-GPE requires positive Gaussian sigma')
         self.variant = variant
         self.position_mode = position_mode
@@ -694,6 +695,10 @@ class TROGeoMSDetectionAblation(nn.Module):
             self.position_embedding = AdaptiveHiSymGPE(base_sigma=gaussian_sigma)
         elif position_mode == 'hisym_crgpe':
             self.position_embedding = HiSymCoreRingGPE(core_sigma=gaussian_sigma, outer_sigma=50.0)
+        elif position_mode == 'hisym_dgpe':
+            self.position_embedding = HiSymDirectionalGPE()
+        elif position_mode == 'hisym_dcrgpe':
+            self.position_embedding = HiSymDirectionalCoreRingGPE(core_sigma=gaussian_sigma, outer_sigma=50.0)
         elif position_mode == 'dg':
             self.position_embedding = DGPositionEmbedding(gaussian_sigma=gaussian_sigma)
         elif position_mode == 'ddg':
@@ -1028,7 +1033,7 @@ class TROGeoMSDetectionAblation(nn.Module):
         else:
             effective_click_map = click_map
         position_map = effective_click_map.unsqueeze(1)
-        if self.position_mode in ('hisym_pe', 'dgrpe', 'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe'):
+        if self.position_mode in ('hisym_pe', 'dgrpe', 'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe'):
             position_feature = self.position_embedding(query_imgs, position_map)
         else:
             position_feature = self.position_embedding(torch.cat((query_imgs, position_map), dim=1))
