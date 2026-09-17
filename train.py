@@ -23,6 +23,7 @@ from torchvision.transforms import Compose, ToTensor, Normalize
 
 from dataset.data_loader import RSDataset
 from dataset.trogeo_loader import TROGeoRSDataset
+from dataset.trogeo_sam_mask_loader import TROGeoSAMMaskDataset
 from model.DetGeo import DetGeo
 from dataset.sam_prompt_loader import SAMPromptDataset
 from model.DetGeo_sam_prompt import DetGeoSAMPrompt
@@ -234,7 +235,7 @@ def main():
     parser.add_argument('--trogeo_aug_mode', choices=('current', 'detgeo'), default='current',
                         help='TROGeo train augmentation: current or original DetGeo RSDataset recipe')
     parser.add_argument('--trogeo_position_mode', choices=('current', 'detgeo', 'dg', 'ddg', 'rdg', 'hisym_pe', 'dgrpe',
-                                                            'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe'), default='current',
+                                                            'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe', 'hisym_sggpe'), default='current',
                         help='TROGeo front-end position encoder')
     parser.add_argument('--trogeo_click_map_mode', choices=('distance', 'gaussian'), default='distance',
                         help='TROGeo click map: original distance-decay map or fixed Gaussian map')
@@ -378,7 +379,7 @@ def main():
                 args.trogeo_click_map_mode != 'gaussian' or args.gaussian_sigma <= 0 or \
                 args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
             parser.error('DGRPE requires Bi-Res, Swin-T, Gaussian map, positive sigma, dadpe=none, and amr=none')
-    if args.trogeo_position_mode in ('dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe'):
+    if args.trogeo_position_mode in ('dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe', 'hisym_sggpe'):
         if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi' or args.trogeo_backbone != 'swin_t' or \
                 args.trogeo_click_map_mode != 'gaussian' or args.gaussian_sigma <= 0 or \
                 args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
@@ -557,8 +558,10 @@ def main():
     ])
 
     if trogeo_mode:
-        dataset_class = TROGeoRSDataset
+        dataset_class = TROGeoSAMMaskDataset if args.trogeo_position_mode == 'hisym_sggpe' else TROGeoRSDataset
         prompt_kwargs = {'click_map_mode': args.trogeo_click_map_mode, 'gaussian_sigma': args.gaussian_sigma}
+        if args.trogeo_position_mode == 'hisym_sggpe':
+            prompt_kwargs['sam_mask_root'] = args.sam_mask_root or None
     elif args.backbone_exp != 'baseline':
         # Backbone ablations retain the original square-position RSDataset.
         dataset_class = RSDataset
@@ -843,6 +846,9 @@ def main():
         logging.info('\nBest Accu: %f\n'%best_accu)
 
 def unpack_batch(batch, args):
+    if args.trogeo_position_mode == 'hisym_sggpe':
+        query_imgs, rs_imgs, original_click_map, sam_mask, ori_gt_bbox, sample_index = batch
+        return query_imgs, rs_imgs, original_click_map, ori_gt_bbox, sample_index, (sam_mask,)
     if args.adaptive_gaussian_field:
         query_imgs, rs_imgs, original_click_map, click_xy, ori_gt_bbox, sample_index = batch
         return query_imgs, rs_imgs, original_click_map, ori_gt_bbox, sample_index, (click_xy,)
