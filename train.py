@@ -234,7 +234,7 @@ def main():
     parser.add_argument('--trogeo_aug_mode', choices=('current', 'detgeo'), default='current',
                         help='TROGeo train augmentation: current or original DetGeo RSDataset recipe')
     parser.add_argument('--trogeo_position_mode', choices=('current', 'detgeo', 'dg', 'ddg', 'rdg', 'hisym_pe', 'dgrpe',
-                                                            'dgrpe_v2', 'hisym_agpe'), default='current',
+                                                            'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe'), default='current',
                         help='TROGeo front-end position encoder')
     parser.add_argument('--trogeo_click_map_mode', choices=('distance', 'gaussian'), default='distance',
                         help='TROGeo click map: original distance-decay map or fixed Gaussian map')
@@ -378,11 +378,11 @@ def main():
                 args.trogeo_click_map_mode != 'gaussian' or args.gaussian_sigma <= 0 or \
                 args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
             parser.error('DGRPE requires Bi-Res, Swin-T, Gaussian map, positive sigma, dadpe=none, and amr=none')
-    if args.trogeo_position_mode in ('dgrpe_v2', 'hisym_agpe'):
+    if args.trogeo_position_mode in ('dgrpe_v2', 'hisym_agpe', 'hisym_crgpe'):
         if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi' or args.trogeo_backbone != 'swin_t' or \
                 args.trogeo_click_map_mode != 'gaussian' or args.gaussian_sigma <= 0 or \
                 args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
-            parser.error('dgrpe_v2/hisym_agpe require Bi-Res, Swin-T, Gaussian map, positive sigma, dadpe=none, and amr=none')
+            parser.error('dgrpe_v2/hisym_agpe/hisym_crgpe require Bi-Res, Swin-T, Gaussian map, positive sigma, dadpe=none, and amr=none')
     if args.bbox_threshold_reg:
         if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
             parser.error('--bbox_threshold_reg is restricted to Bi-Res h2_ind_amhcsfi_res_bi')
