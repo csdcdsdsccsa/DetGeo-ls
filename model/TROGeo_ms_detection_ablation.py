@@ -590,6 +590,7 @@ class TROGeoMSDetectionAblation(nn.Module):
     QCC_RANK_VARIANTS = ('h2_ind_amhcsfi_res_bi_qcc_b', 'h2_ind_amhcsfi_res_bi_qcc_full')
     QCC_FULL_VARIANTS = ('h2_ind_amhcsfi_res_bi_qcc_full',)
     QCC_VARIANTS = QCC_A_VARIANTS + QCC_AF_VARIANTS + QCC_RANK_VARIANTS
+    HISYM_CRGPE_BIRES_VARIANTS = ('h2_ind_amhcsfi_res_bi', 'h2_ind_amhcsfi_res_bi_qcc_af')
     AMHCSFI_RES_BI_VARIANTS = ('h2_ind_amhcsfi_res_bi',) + QCC_VARIANTS
     # Bi-Res keeps its bidirectional guidance and auxiliary heatmap losses;
     # this sibling changes only the final detector from two heads to an
@@ -675,9 +676,12 @@ class TROGeoMSDetectionAblation(nn.Module):
                                                 or dadpe_mode != 'none' or amr_pe_mode != 'none'
                                                 or gaussian_sigma <= 0):
             raise ValueError('DG/DDG/RDG-PE requires Bi-Res, Swin-T, dadpe/amr=none, and positive Gaussian sigma')
-        if position_mode in ('hisym_pe', 'dgrpe', 'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe', 'hisym_sggpe') and (variant != 'h2_ind_amhcsfi_res_bi' or backbone != 'swin_t'
+        if position_mode in ('hisym_pe', 'dgrpe', 'dgrpe_v2', 'hisym_agpe', 'hisym_dgpe', 'hisym_dcrgpe', 'hisym_sggpe') and (variant != 'h2_ind_amhcsfi_res_bi' or backbone != 'swin_t'
                                                        or dadpe_mode != 'none' or amr_pe_mode != 'none'):
             raise ValueError('HiSym-PE/DGRPE requires Bi-Res, Swin-T, dadpe=none, and amr=none')
+        if position_mode == 'hisym_crgpe' and (variant not in self.HISYM_CRGPE_BIRES_VARIANTS or backbone != 'swin_t'
+                                                or dadpe_mode != 'none' or amr_pe_mode != 'none'):
+            raise ValueError('HiSym-CRGPE requires a supported Bi-Res variant, Swin-T, dadpe=none, and amr=none')
         if position_mode in ('dgrpe', 'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe', 'hisym_sggpe') and gaussian_sigma <= 0:
             raise ValueError('DGRPE/Adaptive HiSym-GPE requires positive Gaussian sigma')
         self.variant = variant

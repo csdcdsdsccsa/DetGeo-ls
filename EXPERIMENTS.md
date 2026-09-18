@@ -1,5 +1,18 @@
 # SAM prompt experiment log
 
+## HiSym-CRGPE natural-RNG decoder/loss experiments
+
+All three are independent 25-epoch, from-scratch runs on Bi-Res + AMHCSFI-Res
++ HiSym-CRGPE (Gaussian sigma 25), with shared Swin-T, batch 7, seed 2024,
+and `--standard_rng`. Validation Acc@0.50 selects each run's checkpoint before
+one test pass; none reuses an existing checkpoint for training.
+
+| Experiment | Variant | Training change | Decoder |
+| --- | --- | --- | --- |
+| Bi-Res + AF | `h2_ind_amhcsfi_res_bi` | none | confidence-weighted fusion when pair IoU >= 0.5 |
+| QCC-AF | `h2_ind_amhcsfi_res_bi_qcc_af` | QCC quality loss | C x Q fusion when pair IoU >= 0.5 |
+| Threshold-Reg + AF | `h2_ind_amhcsfi_res_bi` | threshold-aware box regularization | confidence-weighted fusion when pair IoU >= 0.5 |
+
 ## E4: bidirectional Guidance / CSFI ablation (Swin-T, DroneAerial)
 
 - Protocol: shared Swin-T, batch size 7, 24 workers, seed 2024, learning rate

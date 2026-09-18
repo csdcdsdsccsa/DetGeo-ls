@@ -379,18 +379,26 @@ def main():
                 args.trogeo_click_map_mode != 'gaussian' or args.gaussian_sigma <= 0 or \
                 args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
             parser.error('DGRPE requires Bi-Res, Swin-T, Gaussian map, positive sigma, dadpe=none, and amr=none')
-    if args.trogeo_position_mode in ('dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe', 'hisym_sggpe'):
+    if args.trogeo_position_mode in ('dgrpe_v2', 'hisym_agpe', 'hisym_dgpe', 'hisym_dcrgpe', 'hisym_sggpe'):
         if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi' or args.trogeo_backbone != 'swin_t' or \
                 args.trogeo_click_map_mode != 'gaussian' or args.gaussian_sigma <= 0 or \
                 args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
             parser.error('HiSym Gaussian variants require Bi-Res, Swin-T, Gaussian map, positive sigma, dadpe=none, and amr=none')
+    if args.trogeo_position_mode == 'hisym_crgpe':
+        if args.trogeo_ms_det_variant not in ('h2_ind_amhcsfi_res_bi', 'h2_ind_amhcsfi_res_bi_qcc_af') or \
+                args.trogeo_backbone != 'swin_t' or args.trogeo_click_map_mode != 'gaussian' or \
+                args.gaussian_sigma <= 0 or args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
+            parser.error('HiSym-CRGPE requires Bi-Res or Bi-Res QCC-AF, Swin-T, Gaussian map, positive sigma, dadpe=none, and amr=none')
     if args.bbox_threshold_reg:
         if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
             parser.error('--bbox_threshold_reg is restricted to Bi-Res h2_ind_amhcsfi_res_bi')
-        if args.trogeo_backbone != 'swin_t' or args.trogeo_position_mode != 'detgeo':
-            parser.error('--bbox_threshold_reg requires Swin-T and original DetGeo PE')
-        if args.trogeo_click_map_mode != 'distance' or args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
-            parser.error('--bbox_threshold_reg requires distance map, dadpe_mode=none, and amr_pe_mode=none')
+        if args.trogeo_backbone != 'swin_t' or args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
+            parser.error('--bbox_threshold_reg requires Swin-T, dadpe_mode=none, and amr_pe_mode=none')
+        if args.trogeo_position_mode == 'detgeo':
+            if args.trogeo_click_map_mode != 'distance': parser.error('DetGeo-PE Threshold-Reg requires distance map')
+        elif args.trogeo_position_mode == 'hisym_crgpe':
+            if args.trogeo_click_map_mode != 'gaussian' or args.gaussian_sigma <= 0: parser.error('HiSym-CRGPE Threshold-Reg requires Gaussian map and positive sigma')
+        else: parser.error('--bbox_threshold_reg currently supports DetGeo-PE or HiSym-CRGPE')
         if args.rccd:
             parser.error('--bbox_threshold_reg must not be combined with RCCD')
         if args.bbox_threshold_reg_weight < 0.0 or args.bbox_threshold_weight25 < 0.0 or args.bbox_threshold_weight50 < 0.0:
@@ -402,14 +410,14 @@ def main():
     if decoder_count > 1:
         parser.error('--agreement_fusion_decode, --wprf_iou_decode and --wprf_full_decode are mutually exclusive')
     if args.agreement_fusion_decode:
-        if not (args.val or args.test):
-            parser.error('--agreement_fusion_decode is inference-only; use --val or --test')
         if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
             parser.error('--agreement_fusion_decode requires --trogeo_ms_det_variant h2_ind_amhcsfi_res_bi')
-        if args.trogeo_backbone != 'swin_t' or args.trogeo_position_mode != 'detgeo':
-            parser.error('--agreement_fusion_decode requires Swin-T and original DetGeo PE')
-        if args.trogeo_click_map_mode != 'distance':
-            parser.error('--agreement_fusion_decode requires --trogeo_click_map_mode distance')
+        if args.trogeo_backbone != 'swin_t': parser.error('--agreement_fusion_decode requires Swin-T')
+        if args.trogeo_position_mode == 'detgeo':
+            if args.trogeo_click_map_mode != 'distance': parser.error('DetGeo-PE + AF requires distance click map')
+        elif args.trogeo_position_mode == 'hisym_crgpe':
+            if args.trogeo_click_map_mode != 'gaussian' or args.gaussian_sigma <= 0: parser.error('HiSym-CRGPE + AF requires Gaussian click map and positive sigma')
+        else: parser.error('--agreement_fusion_decode currently supports DetGeo-PE or HiSym-CRGPE')
         if args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
             parser.error('--agreement_fusion_decode requires dadpe_mode=none and amr_pe_mode=none')
     if args.wprf_iou_decode or args.wprf_full_decode:
