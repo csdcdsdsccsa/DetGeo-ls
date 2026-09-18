@@ -28,6 +28,19 @@
 | FG-NoCSFI natural | `h2_ind_fg_nocsfi` | natural `--standard_rng` | TBD | TBD |
 | Bi-NoCSFI natural | `h2_ind_bi_nocsfi` | natural `--standard_rng` | TBD | TBD |
 
+### Two-scale DetGeo-style / Bi-Guidance ablation
+
+`h2_ind_detgeo2s` is the w/o Bi-Guidance control for `h2_ind_bi_nocsfi`.
+Both runs use shared Swin-T, current position encoder, distance click map,
+independent Stage3/Stage4 detector heads, the same two-head confidence decoder,
+batch 7, 24 workers, lr `1e-4`, 25 epochs, seed 2024, and natural
+`--standard_rng`.
+
+| Experiment | Variant | Scale-wise Q-S matching | Direct CA | Coarse guidance | Fine guidance | Guidance loss | CSFI |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Two-scale DetGeo | `h2_ind_detgeo2s` | DetGeo spatial matching | no | no | no | no | no |
+| Bi-NoCSFI natural | `h2_ind_bi_nocsfi` | Direct CA | yes | yes | yes | coarse + fine | no |
+
 ### Bi-Res DetGeo PE / DADPE natural-RNG sequence (results pending)
 
 Both runs retain the complete `h2_ind_amhcsfi_res_bi` Bi-Res path: shared

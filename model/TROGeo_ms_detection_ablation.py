@@ -50,6 +50,28 @@ def parameter_free_cosine_correlation(query_feature, satellite_feature, eps=1e-6
     return satellite_feature * (1.0 + gate), gate
 
 
+def detgeo_spatial_fusion(query_feature, satellite_feature, eps=1e-6):
+    """Parameter-free, scale-local DetGeo-style cross-view spatial matching.
+
+    The output is intentionally a normalized satellite map weighted by its
+    query-to-location cosine attention, rather than the residual correlation
+    gate used by :func:`parameter_free_cosine_correlation`.
+    """
+    if query_feature.dim() != 4 or satellite_feature.dim() != 4:
+        raise RuntimeError('DetGeo spatial fusion expects BCHW features')
+    if query_feature.shape[:2] != satellite_feature.shape[:2]:
+        raise RuntimeError('DetGeo spatial fusion query/satellite batch or channel mismatch')
+    query_global = F.normalize(query_feature.mean(dim=(2, 3)), p=2, dim=1, eps=eps)
+    satellite_norm = F.normalize(satellite_feature, p=2, dim=1, eps=eps)
+    score = torch.einsum('bc,bchw->bhw', query_global, satellite_norm)
+    # DetGeo normalization statistics are not a learnable pathway.
+    with torch.no_grad():
+        score_min = score.amin(dim=(1, 2), keepdim=True)
+        score_max = score.amax(dim=(1, 2), keepdim=True)
+    attention = (score - score_min) / (score_max - score_min + eps)
+    return satellite_norm * attention.unsqueeze(1), attention
+
+
 class AdaptiveMultiRangePositionField(nn.Module):
     """Refine a DetGeo distance field with fixed or query-adaptive ranges.
 
@@ -588,6 +610,7 @@ class TROGeoMSDetectionAblation(nn.Module):
                                     BIRES_OUTPUT_CONCAT_NOCSFI_VARIANTS)
     AFUSE_B1_VARIANTS = ('h2_ind_bires_afuse_b1',)
     AFUSE_B0_VARIANTS = ('h2_ind_corr_afuse_b0',)
+    DETGEO_TWO_SCALE_VARIANTS = ('h2_ind_detgeo2s',)
     AFUSE_NEW_VARIANTS = AFUSE_B1_VARIANTS + AFUSE_B0_VARIANTS
     FG_AMHCSFI_RES_SINGLE_VARIANTS = (
         'h2_ind_fg_amhcsfi_res_s3', 'h2_ind_fg_amhcsfi_res_s4', 'h2_ind_fg_amhcsfi_res_afuse')
@@ -626,7 +649,7 @@ class TROGeoMSDetectionAblation(nn.Module):
     THREE_SCALE_VARIANTS = ('h2_ind_3scale', 'h2_ind_3scale_stage2cls05') + QUERY_PE_VARIANTS
     VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive') + \
                      THREE_SCALE_VARIANTS + TWO_SCALE_QUERY_PE_VARIANTS + TWO_SCALE_PGCA_VARIANTS + \
-                     TWO_SCALE_COLLAB_VARIANTS + HABR_VARIANTS + QUERY_REFINE_VARIANTS
+                     TWO_SCALE_COLLAB_VARIANTS + DETGEO_TWO_SCALE_VARIANTS + HABR_VARIANTS + QUERY_REFINE_VARIANTS
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current', dadpe_mode='none',
                  amr_pe_mode='none', gaussian_sigma=25.0,
@@ -713,7 +736,7 @@ class TROGeoMSDetectionAblation(nn.Module):
         if self.three_scale:
             self.cvopm_stage2 = SpatialTransformer(192, 3, 64, depth=1, context_dim=192,
                                                     use_self_attention=False, query_chunk_size=512)
-        if variant not in self.AFUSE_B0_VARIANTS:
+        if variant not in self.AFUSE_B0_VARIANTS + self.DETGEO_TWO_SCALE_VARIANTS:
             self.cvopm_stage3 = SpatialTransformer(384, 6, 64, depth=1, context_dim=384,
                                                     use_self_attention=False)
             self.cvopm_stage4 = SpatialTransformer(768, 12, 64, depth=1, context_dim=768,
@@ -1080,7 +1103,10 @@ class TROGeoMSDetectionAblation(nn.Module):
         self._expect('satellite stage4', r4, 768, 32, 32)
         if self.dadpe_mode == 'multiscale':
             q3, q4, dadpe_p3, dadpe_p4 = self.multiscale_direction_residual(q3, q4, geometry)
-        if self.variant in self.AFUSE_B0_VARIANTS:
+        if self.variant in self.DETGEO_TWO_SCALE_VARIANTS:
+            z3, detgeo_attn3 = detgeo_spatial_fusion(q3, r3)
+            z4, detgeo_attn4 = detgeo_spatial_fusion(q4, r4)
+        elif self.variant in self.AFUSE_B0_VARIANTS:
             z3, corr_gate3 = parameter_free_cosine_correlation(q3, r3)
             z4, corr_gate4 = parameter_free_cosine_correlation(q4, r4)
         elif self.variant in self.BIDIR_GUIDE_VARIANTS:
@@ -1398,6 +1424,11 @@ class TROGeoMSDetectionAblation(nn.Module):
                     print('[E4-FG sanity] fine={} fine_down={} gamma={:.6f} bidirectional={}'.format(
                         tuple(fine_logits.shape), tuple(fine_down.shape), self.fine_guidance.gamma.item(),
                         self.variant in self.BIDIR_GUIDE_VARIANTS), flush=True)
+                if self.variant in self.DETGEO_TWO_SCALE_VARIANTS:
+                    print('[E4-DetGeo2S sanity] attn3={} attn4={} range3=[{:.6f},{:.6f}] range4=[{:.6f},{:.6f}]'.format(
+                        tuple(detgeo_attn3.shape), tuple(detgeo_attn4.shape),
+                        detgeo_attn3.min().item(), detgeo_attn3.max().item(),
+                        detgeo_attn4.min().item(), detgeo_attn4.max().item()), flush=True)
                 if self.variant in self.HABR_VARIANTS:
                     print('[E4-HABR sanity] mode={} prior={} rounds={} lambda43={:.6f} lambda34={:.6f} '
                           'offset_mean={:.6f}'.format(
