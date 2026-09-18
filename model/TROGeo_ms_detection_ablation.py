@@ -1103,8 +1103,8 @@ class TROGeoMSDetectionAblation(nn.Module):
         else:
             q3, q4 = self.encoder(query_input)
             r3, r4 = self.encoder(reference_imgs)
-        self._expect('query stage3', q3, 384, 16, 16)
-        self._expect('query stage4', q4, 768, 8, 8)
+        self._expect('query stage3', q3, 384, query_input.shape[-2] // 16, query_input.shape[-1] // 16)
+        self._expect('query stage4', q4, 768, query_input.shape[-2] // 32, query_input.shape[-1] // 32)
         self._expect('satellite stage3', r3, 384, 64, 64)
         self._expect('satellite stage4', r4, 768, 32, 32)
         if self.dadpe_mode == 'multiscale':
