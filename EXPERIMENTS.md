@@ -54,6 +54,10 @@ batch 7, 24 workers, lr `1e-4`, 25 epochs, seed 2024, and natural
 | Two-scale DetGeo | `h2_ind_detgeo2s` | DetGeo spatial matching | no | no | no | no | no |
 | Bi-NoCSFI natural | `h2_ind_bi_nocsfi` | Direct CA | yes | yes | yes | coarse + fine | no |
 
+`h2_ind_corr2s` is the strict bridge for Two-scale DetGeo: it keeps current PE,
+the two independent heads, two-head loss, and confidence selector, but replaces
+only `normalize(S) * attention` with B0's parameter-free `S * (1 + gate)`.
+
 ### Bi-Res DetGeo PE / DADPE natural-RNG sequence (results pending)
 
 Both runs retain the complete `h2_ind_amhcsfi_res_bi` Bi-Res path: shared

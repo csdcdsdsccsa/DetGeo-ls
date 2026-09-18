@@ -148,7 +148,7 @@ def main():
     parser.add_argument('--trogeo_ms_direct_ca_sh', action='store_true',
                         help='Swin-T stage3/stage4 Direct-CA with separate 6/3-anchor heads and no feature fusion')
     parser.add_argument('--trogeo_ms_det_variant', choices=(
-        'none', 'correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h2_ind_detgeo2s', 'h3_ind', 'h3_adaptive',
+        'none', 'correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h2_ind_detgeo2s', 'h2_ind_corr2s', 'h3_ind', 'h3_adaptive',
         'h2_ind_3scale', 'h2_ind_3scale_stage2cls05', 'h2_ind_3scale_pe_ln_amp',
         'h2_ind_3scale_pe_all_add', 'h2_ind_3scale_pe_all_key', 'h2_ind_3scale_le_ind_res',
         'h2_ind_3scale_le_stage2_res',

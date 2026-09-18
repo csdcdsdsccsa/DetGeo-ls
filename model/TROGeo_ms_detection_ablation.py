@@ -612,6 +612,8 @@ class TROGeoMSDetectionAblation(nn.Module):
     AFUSE_B1_VARIANTS = ('h2_ind_bires_afuse_b1',)
     AFUSE_B0_VARIANTS = ('h2_ind_corr_afuse_b0',)
     DETGEO_TWO_SCALE_VARIANTS = ('h2_ind_detgeo2s',)
+    # Strict DetGeo2S bridge: only its parameter-free Q-S formula differs.
+    CORR_TWO_SCALE_VARIANTS = ('h2_ind_corr2s',)
     AFUSE_NEW_VARIANTS = AFUSE_B1_VARIANTS + AFUSE_B0_VARIANTS
     FG_AMHCSFI_RES_SINGLE_VARIANTS = (
         'h2_ind_fg_amhcsfi_res_s3', 'h2_ind_fg_amhcsfi_res_s4', 'h2_ind_fg_amhcsfi_res_afuse')
@@ -650,7 +652,7 @@ class TROGeoMSDetectionAblation(nn.Module):
     THREE_SCALE_VARIANTS = ('h2_ind_3scale', 'h2_ind_3scale_stage2cls05') + QUERY_PE_VARIANTS
     VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive') + \
                      THREE_SCALE_VARIANTS + TWO_SCALE_QUERY_PE_VARIANTS + TWO_SCALE_PGCA_VARIANTS + \
-                     TWO_SCALE_COLLAB_VARIANTS + DETGEO_TWO_SCALE_VARIANTS + HABR_VARIANTS + QUERY_REFINE_VARIANTS
+                     TWO_SCALE_COLLAB_VARIANTS + DETGEO_TWO_SCALE_VARIANTS + CORR_TWO_SCALE_VARIANTS + HABR_VARIANTS + QUERY_REFINE_VARIANTS
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current', dadpe_mode='none',
                  amr_pe_mode='none', gaussian_sigma=25.0,
@@ -740,7 +742,7 @@ class TROGeoMSDetectionAblation(nn.Module):
         if self.three_scale:
             self.cvopm_stage2 = SpatialTransformer(192, 3, 64, depth=1, context_dim=192,
                                                     use_self_attention=False, query_chunk_size=512)
-        if variant not in self.AFUSE_B0_VARIANTS + self.DETGEO_TWO_SCALE_VARIANTS:
+        if variant not in self.AFUSE_B0_VARIANTS + self.DETGEO_TWO_SCALE_VARIANTS + self.CORR_TWO_SCALE_VARIANTS:
             self.cvopm_stage3 = SpatialTransformer(384, 6, 64, depth=1, context_dim=384,
                                                     use_self_attention=False)
             self.cvopm_stage4 = SpatialTransformer(768, 12, 64, depth=1, context_dim=768,
@@ -1110,6 +1112,9 @@ class TROGeoMSDetectionAblation(nn.Module):
         if self.variant in self.DETGEO_TWO_SCALE_VARIANTS:
             z3, detgeo_attn3 = detgeo_spatial_fusion(q3, r3)
             z4, detgeo_attn4 = detgeo_spatial_fusion(q4, r4)
+        elif self.variant in self.CORR_TWO_SCALE_VARIANTS:
+            z3, corr_gate3 = parameter_free_cosine_correlation(q3, r3)
+            z4, corr_gate4 = parameter_free_cosine_correlation(q4, r4)
         elif self.variant in self.AFUSE_B0_VARIANTS:
             z3, corr_gate3 = parameter_free_cosine_correlation(q3, r3)
             z4, corr_gate4 = parameter_free_cosine_correlation(q4, r4)
@@ -1433,6 +1438,10 @@ class TROGeoMSDetectionAblation(nn.Module):
                         tuple(detgeo_attn3.shape), tuple(detgeo_attn4.shape),
                         detgeo_attn3.min().item(), detgeo_attn3.max().item(),
                         detgeo_attn4.min().item(), detgeo_attn4.max().item()), flush=True)
+                if self.variant in self.CORR_TWO_SCALE_VARIANTS:
+                    print('[E4-Corr2S sanity] gate3={} gate4={} range3=[{:.6f},{:.6f}] range4=[{:.6f},{:.6f}]'.format(
+                        tuple(corr_gate3.shape), tuple(corr_gate4.shape), corr_gate3.min().item(), corr_gate3.max().item(),
+                        corr_gate4.min().item(), corr_gate4.max().item()), flush=True)
                 if self.variant in self.HABR_VARIANTS:
                     print('[E4-HABR sanity] mode={} prior={} rounds={} lambda43={:.6f} lambda34={:.6f} '
                           'offset_mean={:.6f}'.format(
