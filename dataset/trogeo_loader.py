@@ -14,7 +14,8 @@ cv2.setNumThreads(0)
 
 class TROGeoRSDataset(Dataset):
     def __init__(self, data_root, data_name='CVOGL_DroneAerial', split_name='train', img_size=1024,
-                 transform=None, augment=False, aug_mode='current', click_map_mode='distance', gaussian_sigma=25.0):
+                 transform=None, augment=False, aug_mode='current', click_map_mode='distance', gaussian_sigma=25.0,
+                 gaussian_sigma_x=None):
         if data_name not in ('CVOGL_DroneAerial', 'CVOGL_SVI'):
             raise ValueError('unsupported data_name: {}'.format(data_name))
         data_dir = os.path.join(data_root, data_name)
@@ -32,8 +33,11 @@ class TROGeoRSDataset(Dataset):
             raise ValueError('click_map_mode must be distance or gaussian, got {}'.format(click_map_mode))
         if gaussian_sigma <= 0:
             raise ValueError('gaussian_sigma must be > 0')
+        if gaussian_sigma_x is not None and gaussian_sigma_x <= 0:
+            raise ValueError('gaussian_sigma_x must be > 0')
         self.click_map_mode = click_map_mode
         self.gaussian_sigma = float(gaussian_sigma)
+        self.gaussian_sigma_x = self.gaussian_sigma if gaussian_sigma_x is None else float(gaussian_sigma_x)
         self.query_featuremap_hw = (256, 256) if data_name == 'CVOGL_DroneAerial' else (256, 512)
         if aug_mode == 'current':
             self.rs_transform = A.Compose([
@@ -81,19 +85,24 @@ class TROGeoRSDataset(Dataset):
             query = torch.flip(query, dims=[-1])
             click_w = query.shape[-1] - click_w - 1
         click_map = self.make_click_map(self.query_featuremap_hw, click_h, click_w,
-                                        self.click_map_mode, self.gaussian_sigma)
+                                        self.click_map_mode, self.gaussian_sigma, self.gaussian_sigma_x)
         return query, satellite, click_map, bbox.astype(np.float32), index
 
     @staticmethod
-    def make_click_map(shape, click_h, click_w, mode='distance', gaussian_sigma=25.0):
+    def make_click_map(shape, click_h, click_w, mode='distance', gaussian_sigma=25.0, gaussian_sigma_x=None):
         """Return the single float32 click channel used by the TROGeo front end."""
         height, width = shape
         rows = np.arange(height, dtype=np.float32)[:, None]
         cols = np.arange(width, dtype=np.float32)[None, :]
-        dist2 = (rows - click_h) ** 2 + (cols - click_w) ** 2
+        dy2 = (rows - click_h) ** 2
+        dx2 = (cols - click_w) ** 2
         if mode == 'gaussian':
-            click_map = np.exp(-dist2 / (2.0 * float(gaussian_sigma) ** 2))
+            sigma_y = float(gaussian_sigma)
+            sigma_x = sigma_y if gaussian_sigma_x is None else float(gaussian_sigma_x)
+            click_map = np.exp(-(dy2 / (2.0 * sigma_y ** 2) + dx2 / (2.0 * sigma_x ** 2)))
         elif mode == 'distance':
+            # Preserve the original isotropic distance-decay formulation.
+            dist2 = dy2 + dx2
             norm = float((height * height + width * width) ** 0.5)
             click_map = (1.0 - np.sqrt(dist2) / norm) ** 2
         else:

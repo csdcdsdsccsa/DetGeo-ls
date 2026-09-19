@@ -658,7 +658,8 @@ class TROGeoMSDetectionAblation(nn.Module):
                      DETGEO_SINGLE_STAGE4_VARIANTS + HABR_VARIANTS + QUERY_REFINE_VARIANTS
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current', dadpe_mode='none',
-                 amr_pe_mode='none', gaussian_sigma=25.0,
+                 amr_pe_mode='none', gaussian_sigma=25.0, gaussian_sigma_x=None,
+                 crgpe_outer_sigma=50.0, crgpe_outer_sigma_x=None,
                  enable_hqs=False, enable_hqs_v2a=False, enable_hqs_v2b=False, enable_acr=False):
         super().__init__()
         if (emb_size != 768 or backbone not in ('swin_t', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
@@ -727,7 +728,9 @@ class TROGeoMSDetectionAblation(nn.Module):
         elif position_mode == 'hisym_agpe':
             self.position_embedding = AdaptiveHiSymGPE(base_sigma=gaussian_sigma)
         elif position_mode == 'hisym_crgpe':
-            self.position_embedding = HiSymCoreRingGPE(core_sigma=gaussian_sigma, outer_sigma=50.0)
+            self.position_embedding = HiSymCoreRingGPE(
+                core_sigma=gaussian_sigma, core_sigma_x=gaussian_sigma_x,
+                outer_sigma=crgpe_outer_sigma, outer_sigma_x=crgpe_outer_sigma_x)
         elif position_mode == 'hisym_dgpe':
             self.position_embedding = HiSymDirectionalGPE()
         elif position_mode == 'hisym_dcrgpe':

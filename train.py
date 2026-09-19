@@ -267,6 +267,12 @@ def main():
     parser.add_argument('--sam_mask_root', default='', help='optional root of split-indexed SAM masks')
     parser.add_argument('--sam_multimask_root', default='', help='optional root of split-indexed SAM multi-mask npz files')
     parser.add_argument('--gaussian_sigma', default=25.0, type=float, help='Gaussian click sigma at the query feature-map scale')
+    parser.add_argument('--gaussian_sigma_x', default=None, type=float,
+                        help='optional horizontal Gaussian sigma; None keeps sigma_x equal to gaussian_sigma')
+    parser.add_argument('--crgpe_outer_sigma', default=50.0, type=float,
+                        help='HiSym-CRGPE outer Gaussian vertical sigma')
+    parser.add_argument('--crgpe_outer_sigma_x', default=None, type=float,
+                        help='optional HiSym-CRGPE outer horizontal sigma; None keeps it equal to crgpe_outer_sigma')
     parser.add_argument('--sigma_min', default=8.0, type=float)
     parser.add_argument('--sigma_max', default=50.0, type=float)
     parser.add_argument('--freeze_prompt_only', action='store_true', help='train only the zero-init prompt_fusion module')
@@ -288,6 +294,12 @@ def main():
         args.loader_seed = args.seed
     if args.runtime_seed is None:
         args.runtime_seed = args.seed
+    if args.gaussian_sigma_x is not None and args.gaussian_sigma_x <= 0:
+        parser.error('--gaussian_sigma_x must be > 0')
+    if args.crgpe_outer_sigma <= 0:
+        parser.error('--crgpe_outer_sigma must be > 0')
+    if args.crgpe_outer_sigma_x is not None and args.crgpe_outer_sigma_x <= 0:
+        parser.error('--crgpe_outer_sigma_x must be > 0')
     try:
         args.gaussian_bank_values = tuple(float(value.strip()) for value in args.gaussian_bank.split(',') if value.strip())
     except ValueError:
@@ -389,6 +401,14 @@ def main():
                 args.trogeo_backbone != 'swin_t' or args.trogeo_click_map_mode != 'gaussian' or \
                 args.gaussian_sigma <= 0 or args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
             parser.error('HiSym-CRGPE requires Bi-Res or Bi-Res QCC-AF, Swin-T, Gaussian map, positive sigma, dadpe=none, and amr=none')
+        core_x = args.gaussian_sigma if args.gaussian_sigma_x is None else args.gaussian_sigma_x
+        outer_x = args.crgpe_outer_sigma if args.crgpe_outer_sigma_x is None else args.crgpe_outer_sigma_x
+        if args.crgpe_outer_sigma <= args.gaussian_sigma:
+            parser.error('CRGPE outer sigma_y must be > core sigma_y')
+        if outer_x <= core_x:
+            parser.error('CRGPE outer sigma_x must be > core sigma_x')
+    elif args.gaussian_sigma_x is not None or args.crgpe_outer_sigma_x is not None:
+        parser.error('anisotropic Gaussian sigma parameters are restricted to HiSym-CRGPE')
     if args.bbox_threshold_reg:
         if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
             parser.error('--bbox_threshold_reg is restricted to Bi-Res h2_ind_amhcsfi_res_bi')
@@ -567,7 +587,8 @@ def main():
 
     if trogeo_mode:
         dataset_class = TROGeoSAMMaskDataset if args.trogeo_position_mode == 'hisym_sggpe' else TROGeoRSDataset
-        prompt_kwargs = {'click_map_mode': args.trogeo_click_map_mode, 'gaussian_sigma': args.gaussian_sigma}
+        prompt_kwargs = {'click_map_mode': args.trogeo_click_map_mode, 'gaussian_sigma': args.gaussian_sigma,
+                         'gaussian_sigma_x': args.gaussian_sigma_x}
         if args.trogeo_position_mode == 'hisym_sggpe':
             prompt_kwargs['sam_mask_root'] = args.sam_mask_root or None
     elif args.backbone_exp != 'baseline':
@@ -652,7 +673,9 @@ def main():
                                            variant=args.trogeo_ms_det_variant,
                                            position_mode=args.trogeo_position_mode,
                                            dadpe_mode=args.dadpe_mode, amr_pe_mode=args.amr_pe_mode,
-                                           gaussian_sigma=args.gaussian_sigma,
+                                           gaussian_sigma=args.gaussian_sigma, gaussian_sigma_x=args.gaussian_sigma_x,
+                                           crgpe_outer_sigma=args.crgpe_outer_sigma,
+                                           crgpe_outer_sigma_x=args.crgpe_outer_sigma_x,
                                            enable_hqs=args.hqs_v1,
                                            enable_hqs_v2a=args.hqs_v2a, enable_hqs_v2b=args.hqs_v2b,
                                            enable_acr=args.acr_head)

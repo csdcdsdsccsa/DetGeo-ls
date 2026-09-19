@@ -587,3 +587,13 @@ ordinary `--standard_rng`; no run initializes from a current-PE checkpoint.
   Direct-CA, guidance, CSFI or auxiliary guidance losses.
 
 Each run selects the validation Acc@0.50 best checkpoint and tests it once.
+
+# SVI scale-adapted HiSym-CRGPE
+
+This CVOGL_SVI-only Full Model control retains `h2_ind_amhcsfi_res_bi`, shared
+Swin-T, Bi-Guidance, AMHCSFI-Res, two heads, coarse/fine losses, and ordinary
+natural RNG. It changes only the Gaussian geometry for the 256x512 query:
+dataset core `(sigma_y, sigma_x)=(25,50)` and CRGPE outer
+`(sigma_y, sigma_x)=(50,100)`. The original SVI and Drone isotropic controls
+remain unchanged because omitted horizontal sigmas default to their vertical
+counterparts.
