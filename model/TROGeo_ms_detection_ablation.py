@@ -7,6 +7,7 @@ import torchvision.models as models
 
 from .TROGeo_ms_direct_ca_sh import SwinTMultiStageEncoder
 from .TROGeo_wo_ost import double_conv
+from .darknet import ConvBatchNormReLU
 from .detgeo_position_embedding import DetGeoPositionEmbedding
 from .dg_position_embedding import DGPositionEmbedding, DDGPositionEmbedding, RDGPositionEmbedding
 from .trogeo_attention import CrossAttention, SpatialTransformer
@@ -614,6 +615,8 @@ class TROGeoMSDetectionAblation(nn.Module):
     DETGEO_TWO_SCALE_VARIANTS = ('h2_ind_detgeo2s',)
     # Strict DetGeo2S bridge: only its parameter-free Q-S formula differs.
     CORR_TWO_SCALE_VARIANTS = ('h2_ind_corr2s',)
+    # Strict single-scale DetGeo bridge: native Stage4 matching and detector.
+    DETGEO_SINGLE_STAGE4_VARIANTS = ('corr1s_s4',)
     AFUSE_NEW_VARIANTS = AFUSE_B1_VARIANTS + AFUSE_B0_VARIANTS
     FG_AMHCSFI_RES_SINGLE_VARIANTS = (
         'h2_ind_fg_amhcsfi_res_s3', 'h2_ind_fg_amhcsfi_res_s4', 'h2_ind_fg_amhcsfi_res_afuse')
@@ -652,7 +655,8 @@ class TROGeoMSDetectionAblation(nn.Module):
     THREE_SCALE_VARIANTS = ('h2_ind_3scale', 'h2_ind_3scale_stage2cls05') + QUERY_PE_VARIANTS
     VALID_VARIANTS = ('correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h3_ind', 'h3_adaptive') + \
                      THREE_SCALE_VARIANTS + TWO_SCALE_QUERY_PE_VARIANTS + TWO_SCALE_PGCA_VARIANTS + \
-                     TWO_SCALE_COLLAB_VARIANTS + DETGEO_TWO_SCALE_VARIANTS + CORR_TWO_SCALE_VARIANTS + HABR_VARIANTS + QUERY_REFINE_VARIANTS
+                     TWO_SCALE_COLLAB_VARIANTS + DETGEO_TWO_SCALE_VARIANTS + CORR_TWO_SCALE_VARIANTS + \
+                     DETGEO_SINGLE_STAGE4_VARIANTS + HABR_VARIANTS + QUERY_REFINE_VARIANTS
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current', dadpe_mode='none',
                  amr_pe_mode='none', gaussian_sigma=25.0,
@@ -742,14 +746,20 @@ class TROGeoMSDetectionAblation(nn.Module):
         if self.three_scale:
             self.cvopm_stage2 = SpatialTransformer(192, 3, 64, depth=1, context_dim=192,
                                                     use_self_attention=False, query_chunk_size=512)
-        if variant not in self.AFUSE_B0_VARIANTS + self.DETGEO_TWO_SCALE_VARIANTS + self.CORR_TWO_SCALE_VARIANTS:
+        if variant not in (self.AFUSE_B0_VARIANTS + self.DETGEO_TWO_SCALE_VARIANTS +
+                           self.CORR_TWO_SCALE_VARIANTS + self.DETGEO_SINGLE_STAGE4_VARIANTS):
             self.cvopm_stage3 = SpatialTransformer(384, 6, 64, depth=1, context_dim=384,
                                                     use_self_attention=False)
             self.cvopm_stage4 = SpatialTransformer(768, 12, 64, depth=1, context_dim=768,
                                                     use_self_attention=False)
         self._logged_sanity = False
 
-        if variant == 'correct63':
+        if variant in self.DETGEO_SINGLE_STAGE4_VARIANTS:
+            self.det_head_corr1s_s4 = nn.Sequential(
+                ConvBatchNormReLU(768, 384, 1, 1, 0, 1, leaky=True, instance=False),
+                nn.Conv2d(384, 45, kernel_size=1),
+            )
+        elif variant == 'correct63':
             self.det_head_stage3 = nn.Conv2d(384, 30, kernel_size=1)
             self.stage4_align = nn.Sequential(
                 nn.ConvTranspose2d(768, 384, kernel_size=4, stride=2, padding=1),
@@ -1109,7 +1119,9 @@ class TROGeoMSDetectionAblation(nn.Module):
         self._expect('satellite stage4', r4, 768, 32, 32)
         if self.dadpe_mode == 'multiscale':
             q3, q4, dadpe_p3, dadpe_p4 = self.multiscale_direction_residual(q3, q4, geometry)
-        if self.variant in self.DETGEO_TWO_SCALE_VARIANTS:
+        if self.variant in self.DETGEO_SINGLE_STAGE4_VARIANTS:
+            z4, detgeo_attn4 = detgeo_spatial_fusion(q4, r4)
+        elif self.variant in self.DETGEO_TWO_SCALE_VARIANTS:
             z3, detgeo_attn3 = detgeo_spatial_fusion(q3, r3)
             z4, detgeo_attn4 = detgeo_spatial_fusion(q4, r4)
         elif self.variant in self.CORR_TWO_SCALE_VARIANTS:
@@ -1180,7 +1192,11 @@ class TROGeoMSDetectionAblation(nn.Module):
         elif self.variant in self.CSFI_VARIANTS:
             z3, z4, csfi_gate3, csfi_gate4 = self.cross_scale_interaction(z3, z4)
 
-        if self.three_scale:
+        if self.variant in self.DETGEO_SINGLE_STAGE4_VARIANTS:
+            p = self.det_head_corr1s_s4(z4)
+            self._expect('Corr1S-S4 prediction', p, 45, 32, 32)
+            predictions = {'single_s4': p, 'detgeo_attn4': detgeo_attn4}
+        elif self.three_scale:
             p2 = self.det_head_stage2(self.stage2_align(z2))
             p3 = self.det_head_stage3(z3)
             p4 = self.det_head_stage4(self.stage4_align(z4))
@@ -1328,7 +1344,13 @@ class TROGeoMSDetectionAblation(nn.Module):
 
         if not self._logged_sanity:
             shapes = {name: tuple(value.shape) for name, value in predictions.items()}
-            if self.three_scale:
+            if self.variant in self.DETGEO_SINGLE_STAGE4_VARIANTS:
+                print('[Corr1S-S4 sanity] variant={} position=current click_map=distance '
+                      'single_scale=stage4 q4={} r4={} z4={} pred={} direct_ca=False '
+                      'bi_guidance=False csfi=False amhcsfi_res=False'.format(
+                          self.variant, tuple(q4.shape), tuple(r4.shape), tuple(z4.shape),
+                          tuple(predictions['single_s4'].shape)), flush=True)
+            elif self.three_scale:
                 print('[TROGeo MS detection sanity] variant={} shared_encoder=True '
                       'self_attention_stage2=False self_attention_stage3=False self_attention_stage4=False '
                       'stage2_query_chunk=512 q2={} q3={} q4={} r2={} r3={} r4={} z2={} z3={} z4={} '
