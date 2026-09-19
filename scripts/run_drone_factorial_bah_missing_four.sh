@@ -45,3 +45,7 @@ run_one 001 h2_ind_detgeo2s hisym_crgpe gaussian
 run_one 011 h2_ind_detgeo2s_amhcsfi_res hisym_crgpe gaussian
 run_one 101 h2_ind_bi_nocsfi hisym_crgpe gaussian
 echo '[Drone factorial] ALL FOUR COMPLETE'
+
+# The original SVI three-control queue was intentionally stopped after its
+# completed Bi-Res row.  These are fresh runs of only its remaining two rows.
+bash scripts/run_e4_svi_remaining_detgeope_naturalrng.sh
