@@ -148,7 +148,7 @@ def main():
     parser.add_argument('--trogeo_ms_direct_ca_sh', action='store_true',
                         help='Swin-T stage3/stage4 Direct-CA with separate 6/3-anchor heads and no feature fusion')
     parser.add_argument('--trogeo_ms_det_variant', choices=(
-        'none', 'correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h2_ind_detgeo2s', 'h2_ind_corr2s', 'corr1s_s4', 'h3_ind', 'h3_adaptive',
+        'none', 'correct63', 'b_multigrid', 'h2_shared', 'h2_ind', 'h2_ind_detgeo2s', 'h2_ind_detgeo2s_amhcsfi_res', 'h2_ind_corr2s', 'corr1s_s4', 'h3_ind', 'h3_adaptive',
         'h2_ind_3scale', 'h2_ind_3scale_stage2cls05', 'h2_ind_3scale_pe_ln_amp',
         'h2_ind_3scale_pe_all_add', 'h2_ind_3scale_pe_all_key', 'h2_ind_3scale_le_ind_res',
         'h2_ind_3scale_le_stage2_res',
@@ -397,10 +397,15 @@ def main():
                 args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
             parser.error('HiSym Gaussian variants require Bi-Res, Swin-T, Gaussian map, positive sigma, dadpe=none, and amr=none')
     if args.trogeo_position_mode == 'hisym_crgpe':
-        if args.trogeo_ms_det_variant not in ('h2_ind_amhcsfi_res_bi', 'h2_ind_amhcsfi_res_bi_qcc_af') or \
+        hisym_crgpe_supported_variants = (
+            'h2_ind_detgeo2s', 'h2_ind_detgeo2s_amhcsfi_res',
+            'h2_ind_bi_nocsfi', 'h2_ind_amhcsfi_res_bi',
+            'h2_ind_amhcsfi_res_bi_qcc_af',
+        )
+        if args.trogeo_ms_det_variant not in hisym_crgpe_supported_variants or \
                 args.trogeo_backbone != 'swin_t' or args.trogeo_click_map_mode != 'gaussian' or \
                 args.gaussian_sigma <= 0 or args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
-            parser.error('HiSym-CRGPE requires Bi-Res or Bi-Res QCC-AF, Swin-T, Gaussian map, positive sigma, dadpe=none, and amr=none')
+            parser.error('HiSym-CRGPE requires a supported two-scale variant, Swin-T, Gaussian map, positive sigma, dadpe=none, and amr=none')
         core_x = args.gaussian_sigma if args.gaussian_sigma_x is None else args.gaussian_sigma_x
         outer_x = args.crgpe_outer_sigma if args.crgpe_outer_sigma_x is None else args.crgpe_outer_sigma_x
         if args.crgpe_outer_sigma <= args.gaussian_sigma:

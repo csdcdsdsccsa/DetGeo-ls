@@ -597,3 +597,29 @@ dataset core `(sigma_y, sigma_x)=(25,50)` and CRGPE outer
 `(sigma_y, sigma_x)=(50,100)`. The original SVI and Drone isotropic controls
 remain unchanged because omitted horizontal sigmas default to their vertical
 counterparts.
+
+# DroneAerial three-module full-factorial ablation
+
+The three binary modules are **B** (Direct-CA plus bidirectional coarse/fine
+guidance and their auxiliary losses), **A** (AMHCSFI-Res), and **H**
+(HiSym-CRGPE).  All rows use shared Swin-T, 1024 input, batch 7, 24 workers,
+25 epochs, `lr=1e-4`, `--standard_rng --seed 2024`, and validation-best
+checkpoint testing.  No RNG save/restore, padding module, or private seed is
+used.
+
+| Code | Experiment | B | A | H |
+|---|---|---:|---:|---:|
+| 000 | Two-scale DetGeo + current PE | 0 | 0 | 0 |
+| 001 | Two-scale DetGeo + HiSym-CRGPE | 0 | 0 | 1 |
+| 010 | Two-scale DetGeo + AMHCSFI-Res + current PE | 0 | 1 | 0 |
+| 011 | Two-scale DetGeo + AMHCSFI-Res + HiSym-CRGPE | 0 | 1 | 1 |
+| 100 | Bi-NoCSFI + current PE | 1 | 0 | 0 |
+| 101 | Bi-Guidance + HiSym-CRGPE | 1 | 0 | 1 |
+| 110 | Bi-Res + current PE | 1 | 1 | 0 |
+| 111 | Full Model + HiSym-CRGPE | 1 | 1 | 1 |
+
+For every B=0 row, Direct-CA, Bi-Guidance, coarse/fine auxiliary losses and
+their logits are absent.  Stage3 and Stage4 instead use the same parameter-free
+DetGeo spatial matching as `h2_ind_detgeo2s`, followed by independent heads
+and ordinary confidence selection.  The 010/011 rows add only AMHCSFI-Res
+after that matching through `h2_ind_detgeo2s_amhcsfi_res`.

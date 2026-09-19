@@ -590,7 +590,11 @@ class TROGeoMSDetectionAblation(nn.Module):
     QCC_RANK_VARIANTS = ('h2_ind_amhcsfi_res_bi_qcc_b', 'h2_ind_amhcsfi_res_bi_qcc_full')
     QCC_FULL_VARIANTS = ('h2_ind_amhcsfi_res_bi_qcc_full',)
     QCC_VARIANTS = QCC_A_VARIANTS + QCC_AF_VARIANTS + QCC_RANK_VARIANTS
-    HISYM_CRGPE_BIRES_VARIANTS = ('h2_ind_amhcsfi_res_bi', 'h2_ind_amhcsfi_res_bi_qcc_af')
+    HISYM_CRGPE_SUPPORTED_VARIANTS = (
+        'h2_ind_detgeo2s', 'h2_ind_detgeo2s_amhcsfi_res',
+        'h2_ind_bi_nocsfi', 'h2_ind_amhcsfi_res_bi',
+        'h2_ind_amhcsfi_res_bi_qcc_af',
+    )
     AMHCSFI_RES_BI_VARIANTS = ('h2_ind_amhcsfi_res_bi',) + QCC_VARIANTS
     # Bi-Res keeps its bidirectional guidance and auxiliary heatmap losses;
     # this sibling changes only the final detector from two heads to an
@@ -611,7 +615,11 @@ class TROGeoMSDetectionAblation(nn.Module):
                                     BIRES_OUTPUT_CONCAT_NOCSFI_VARIANTS)
     AFUSE_B1_VARIANTS = ('h2_ind_bires_afuse_b1',)
     AFUSE_B0_VARIANTS = ('h2_ind_corr_afuse_b0',)
-    DETGEO_TWO_SCALE_VARIANTS = ('h2_ind_detgeo2s',)
+    # This is the B=0/A=1 factorial sibling: it reuses the parameter-free
+    # DetGeo matching path, then applies AMHCSFI-Res.  It must not acquire
+    # Direct-CA, bidirectional guidance, or its auxiliary losses.
+    DETGEO_AMHCSFI_RES_VARIANTS = ('h2_ind_detgeo2s_amhcsfi_res',)
+    DETGEO_TWO_SCALE_VARIANTS = ('h2_ind_detgeo2s',) + DETGEO_AMHCSFI_RES_VARIANTS
     # Strict DetGeo2S bridge: only its parameter-free Q-S formula differs.
     CORR_TWO_SCALE_VARIANTS = ('h2_ind_corr2s',)
     # Strict single-scale DetGeo bridge: native Stage4 matching and detector.
@@ -623,7 +631,7 @@ class TROGeoMSDetectionAblation(nn.Module):
                                   FG_AMHCSFI_RES_SINGLE_VARIANTS
     AMHCSFI_RES_VARIANTS = (AMHCSFI_RES_BI_VARIANTS + AMHCSFI_RES_BI_SINGLE_VARIANTS +
                             BIRES_OUTPUT_AMHCSFI_SINGLE_VARIANTS +
-                            AMHCSFI_RES_GUIDE_VARIANTS)
+                            AMHCSFI_RES_GUIDE_VARIANTS + DETGEO_AMHCSFI_RES_VARIANTS)
     ADAPTIVE_CSFI_CHANNEL_VARIANTS = ('h2_ind_csfi_cg_channel', 'h2_ind_csfi_cg_ar')
     ADAPTIVE_CSFI_DIRECTION_VARIANTS = ('h2_ind_csfi_cg_dir', 'h2_ind_csfi_cg_ar')
     NO_CSFI_GUIDE_VARIANTS = ('h2_ind_fg_nocsfi', 'h2_ind_bi_nocsfi') + \
@@ -685,9 +693,9 @@ class TROGeoMSDetectionAblation(nn.Module):
         if position_mode in ('hisym_pe', 'dgrpe', 'dgrpe_v2', 'hisym_agpe', 'hisym_dgpe', 'hisym_dcrgpe', 'hisym_sggpe') and (variant != 'h2_ind_amhcsfi_res_bi' or backbone != 'swin_t'
                                                        or dadpe_mode != 'none' or amr_pe_mode != 'none'):
             raise ValueError('HiSym-PE/DGRPE requires Bi-Res, Swin-T, dadpe=none, and amr=none')
-        if position_mode == 'hisym_crgpe' and (variant not in self.HISYM_CRGPE_BIRES_VARIANTS or backbone != 'swin_t'
+        if position_mode == 'hisym_crgpe' and (variant not in self.HISYM_CRGPE_SUPPORTED_VARIANTS or backbone != 'swin_t'
                                                 or dadpe_mode != 'none' or amr_pe_mode != 'none'):
-            raise ValueError('HiSym-CRGPE requires a supported Bi-Res variant, Swin-T, dadpe=none, and amr=none')
+            raise ValueError('HiSym-CRGPE requires a supported two-scale variant, Swin-T, dadpe=none, and amr=none')
         if position_mode in ('dgrpe', 'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe', 'hisym_sggpe') and gaussian_sigma <= 0:
             raise ValueError('DGRPE/Adaptive HiSym-GPE requires positive Gaussian sigma')
         self.variant = variant
@@ -1448,6 +1456,21 @@ class TROGeoMSDetectionAblation(nn.Module):
                               self.amhcsfi_res_refiner.refine_beta3.item(), self.amhcsfi_res_refiner.refine_beta4.item(),
                               d['modulation3'].mean().item(), d['modulation4'].mean().item(),
                               w3[0].item(), w3[1].item(), w3[2].item(), w4[0].item(), w4[1].item(), w4[2].item()), flush=True)
+                if self.variant in self.DETGEO_AMHCSFI_RES_VARIANTS:
+                    print('[DetGeo2S-AMHCSFI-Res sanity] variant={} detgeo_matching=True '
+                          'direct_ca=False bi_guidance=False guidance_loss=False amhcsfi_res=True '
+                          'position_mode={} attn3={} attn4={} alpha3={:.6f} alpha4={:.6f} '
+                          'beta3={:.6f} beta4={:.6f}'.format(
+                              self.variant, self.position_mode, tuple(detgeo_attn3.shape), tuple(detgeo_attn4.shape),
+                              self.cross_scale_interaction.alpha3.item(), self.cross_scale_interaction.alpha4.item(),
+                              self.amhcsfi_res_refiner.refine_beta3.item(), self.amhcsfi_res_refiner.refine_beta4.item()),
+                          flush=True)
+                if self.position_mode == 'hisym_crgpe':
+                    d = self.position_embedding.last_diagnostics
+                    print('[HiSym-CRGPE sanity] core_sigma_y={} core_sigma_x={} outer_sigma_y={} outer_sigma_x={} '
+                          'core_mean={:.6f} ring_mean={:.6f}'.format(
+                              d['core_sigma_y'], d['core_sigma_x'], d['outer_sigma_y'], d['outer_sigma_x'],
+                              d['core_mean'].item(), d['ring_mean'].item()), flush=True)
                 if self.variant == 'h2_ind_fg_amhcsfi_res_afuse':
                     mean_weights = fusion_weights.mean(dim=0)
                     print('[E4-FG-AMHCSFI-AFuse sanity] w3={:.6f} w4={:.6f} sum={:.6f}'.format(
