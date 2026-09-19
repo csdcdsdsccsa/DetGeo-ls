@@ -569,3 +569,21 @@ AMHCSFI-Res, auxiliary guidance losses, fusion decoding, and quality/ranking
 heads are disabled. This is an SVI-only data migration of the DroneAerial
 natural-RNG baseline: seed 2024, batch 7, workers 24, 25 epochs and `lr=1e-4`.
 Validation Acc@0.50 selects the checkpoint, which is tested once.
+
+# SVI DetGeo-PE + distance position-encoder controls
+
+Three CVOGL_SVI controls replace only the query encoder from current
+`double_conv(4->3)` to original `DetGeoPositionEmbedding` (`Conv1x1(4->3) +
+BatchNorm + LeakyReLU`), while retaining the distance map. They all use shared
+Swin-T, 1024 input, batch 7, 24 workers, 25 epochs, lr=1e-4, seed 2024, and
+ordinary `--standard_rng`; no run initializes from a current-PE checkpoint.
+
+- Bi-Res: `h2_ind_amhcsfi_res_bi`; retains Direct-CA, bidirectional guidance,
+  AMHCSFI-Res, two heads, and its coarse/fine auxiliary losses.
+- Bi-NoCSFI: `h2_ind_bi_nocsfi`; retains Direct-CA, bidirectional guidance,
+  two heads, and its existing coarse/fine auxiliary losses, but no CSFI.
+- Two-scale DetGeo: `h2_ind_detgeo2s`; retains parameter-free DetGeo-style
+  Stage3/Stage4 matching, two heads and confidence selection, with no
+  Direct-CA, guidance, CSFI or auxiliary guidance losses.
+
+Each run selects the validation Acc@0.50 best checkpoint and tests it once.
