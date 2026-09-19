@@ -1,4 +1,4 @@
-"""Structural and shape checks for the strict native-Stage4 Corr1S baseline."""
+"""Structural checks for strict Stage4-only Corr1S with a 64x64 detector."""
 
 import argparse
 
@@ -22,11 +22,16 @@ def main():
     present = [name for name in forbidden if hasattr(model, name)]
     if present:
         raise AssertionError('Corr1S-S4 unexpectedly constructed: {}'.format(present))
+    if not hasattr(model, 'corr1s_stage4_align'):
+        raise AssertionError('Corr1S-S4 64x64 Stage4 alignment is missing')
     if not hasattr(model, 'det_head_corr1s_s4'):
-        raise AssertionError('Corr1S-S4 native Stage4 head is missing')
+        raise AssertionError('Corr1S-S4 single detector head is missing')
 
     encoder_outputs = []
-    hook = model.encoder.register_forward_hook(lambda _module, _args, output: encoder_outputs.append(output))
+    align_outputs = []
+    encoder_hook = model.encoder.register_forward_hook(lambda _module, _args, output: encoder_outputs.append(output))
+    align_hook = model.corr1s_stage4_align.register_forward_hook(
+        lambda _module, _args, output: align_outputs.append(output))
     try:
         with torch.no_grad():
             query = torch.randn(1, 3, *query_hw, device=device)
@@ -34,7 +39,8 @@ def main():
             click_map = torch.rand(1, *query_hw, device=device)
             predictions, _ = model(query, satellite, click_map)
     finally:
-        hook.remove()
+        encoder_hook.remove()
+        align_hook.remove()
 
     if len(encoder_outputs) != 2:
         raise AssertionError('expected shared encoder to run twice, got {}'.format(len(encoder_outputs)))
@@ -43,14 +49,18 @@ def main():
     if tuple(query_q4.shape) != expected_q4 or tuple(satellite_r4.shape) != (1, 768, 32, 32):
         raise AssertionError('unexpected Stage4 shapes: q4={} r4={}'.format(
             tuple(query_q4.shape), tuple(satellite_r4.shape)))
+    if len(align_outputs) != 1 or tuple(align_outputs[0].shape) != (1, 384, 64, 64):
+        raise AssertionError('unexpected aligned Stage4 shape {}'.format(
+            None if not align_outputs else tuple(align_outputs[0].shape)))
     if set(predictions) != {'single_s4', 'detgeo_attn4'}:
         raise AssertionError('unexpected predictions: {}'.format(sorted(predictions)))
-    if tuple(predictions['single_s4'].shape) != (1, 45, 32, 32):
+    if tuple(predictions['single_s4'].shape) != (1, 45, 64, 64):
         raise AssertionError('unexpected prediction shape {}'.format(tuple(predictions['single_s4'].shape)))
     if tuple(predictions['detgeo_attn4'].shape) != (1, 32, 32):
         raise AssertionError('unexpected attention shape {}'.format(tuple(predictions['detgeo_attn4'].shape)))
-    print('Corr1S-S4 OK: data={} q4={} r4={} pred={} device={}'.format(
+    print('Corr1S-S4 OK: data={} q4={} r4={} attn4={} aligned4={} pred={} device={}'.format(
         args.data_name, tuple(query_q4.shape), tuple(satellite_r4.shape),
+        tuple(predictions['detgeo_attn4'].shape), tuple(align_outputs[0].shape),
         tuple(predictions['single_s4'].shape), device))
 
 

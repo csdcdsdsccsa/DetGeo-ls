@@ -7,7 +7,6 @@ import torchvision.models as models
 
 from .TROGeo_ms_direct_ca_sh import SwinTMultiStageEncoder
 from .TROGeo_wo_ost import double_conv
-from .darknet import ConvBatchNormReLU
 from .detgeo_position_embedding import DetGeoPositionEmbedding
 from .dg_position_embedding import DGPositionEmbedding, DDGPositionEmbedding, RDGPositionEmbedding
 from .trogeo_attention import CrossAttention, SpatialTransformer
@@ -755,10 +754,11 @@ class TROGeoMSDetectionAblation(nn.Module):
         self._logged_sanity = False
 
         if variant in self.DETGEO_SINGLE_STAGE4_VARIANTS:
-            self.det_head_corr1s_s4 = nn.Sequential(
-                ConvBatchNormReLU(768, 384, 1, 1, 0, 1, leaky=True, instance=False),
-                nn.Conv2d(384, 45, kernel_size=1),
+            self.corr1s_stage4_align = nn.Sequential(
+                nn.ConvTranspose2d(768, 384, kernel_size=4, stride=2, padding=1),
+                nn.ReLU(inplace=True),
             )
+            self.det_head_corr1s_s4 = nn.Conv2d(384, 45, kernel_size=1)
         elif variant == 'correct63':
             self.det_head_stage3 = nn.Conv2d(384, 30, kernel_size=1)
             self.stage4_align = nn.Sequential(
@@ -1193,8 +1193,10 @@ class TROGeoMSDetectionAblation(nn.Module):
             z3, z4, csfi_gate3, csfi_gate4 = self.cross_scale_interaction(z3, z4)
 
         if self.variant in self.DETGEO_SINGLE_STAGE4_VARIANTS:
-            p = self.det_head_corr1s_s4(z4)
-            self._expect('Corr1S-S4 prediction', p, 45, 32, 32)
+            aligned4 = self.corr1s_stage4_align(z4)
+            self._expect('Corr1S-S4 aligned Stage4', aligned4, 384, 64, 64)
+            p = self.det_head_corr1s_s4(aligned4)
+            self._expect('Corr1S-S4 prediction', p, 45, 64, 64)
             predictions = {'single_s4': p, 'detgeo_attn4': detgeo_attn4}
         elif self.three_scale:
             p2 = self.det_head_stage2(self.stage2_align(z2))
@@ -1346,10 +1348,10 @@ class TROGeoMSDetectionAblation(nn.Module):
             shapes = {name: tuple(value.shape) for name, value in predictions.items()}
             if self.variant in self.DETGEO_SINGLE_STAGE4_VARIANTS:
                 print('[Corr1S-S4 sanity] variant={} position=current click_map=distance '
-                      'single_scale=stage4 q4={} r4={} z4={} pred={} direct_ca=False '
+                      'single_scale=stage4 q4={} r4={} z4={} aligned4={} pred={} direct_ca=False '
                       'bi_guidance=False csfi=False amhcsfi_res=False'.format(
                           self.variant, tuple(q4.shape), tuple(r4.shape), tuple(z4.shape),
-                          tuple(predictions['single_s4'].shape)), flush=True)
+                          tuple(aligned4.shape), tuple(predictions['single_s4'].shape)), flush=True)
             elif self.three_scale:
                 print('[TROGeo MS detection sanity] variant={} shared_encoder=True '
                       'self_attention_stage2=False self_attention_stage3=False self_attention_stage4=False '

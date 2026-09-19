@@ -921,8 +921,8 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
         'h2_ind_3scale_pe_all_add', 'h2_ind_3scale_pe_all_key', 'h2_ind_3scale_le_ind_res',
         'h2_ind_3scale_le_stage2_res')
     if variant == 'corr1s_s4':
-        p = predictions['single_s4'].view(predictions['single_s4'].shape[0], 9, 5, 32, 32)
-        target, best = build_target(ori_gt_bbox, anchors_full, args.img_size, 32)
+        p = predictions['single_s4'].view(predictions['single_s4'].shape[0], 9, 5, 64, 64)
+        target, best = build_target(ori_gt_bbox, anchors_full, args.img_size, 64)
         if include_loss:
             loss_geo, loss_cls = yolo_loss(p, target, anchors_full, best, args.img_size)
         else:

@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PYTHON_BIN="${PYTHON_BIN:-/root/miniconda3/envs/detgeo/bin/python}"
-NAME="corr1s_s4_currentpe_distance_naturalrng_swin_t_svi_seed2024"
+NAME="corr1s_s4_grid64_currentpe_distance_naturalrng_swin_t_svi_seed2024"
 COMMON=(--gpu 0 --num_workers 24 --batch_size 7 --emb_size 768 --img_size 1024
   --data_root data --data_name CVOGL_SVI --trogeo_backbone swin_t
   --trogeo_ms_det_variant corr1s_s4 --trogeo_position_mode current --trogeo_click_map_mode distance

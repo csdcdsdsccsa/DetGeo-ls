@@ -549,3 +549,12 @@ exactly 0.5, making QCC-A/B reproduce confidence competition at initialization.
 Run order is QCC-A -> QCC-B -> QCC-Full, each with batch 7, workers 24,
 seed 2024, 25 epochs, validation-best checkpoint, then one test evaluation.
 Results: TBD.
+# Corr1S-S4 Grid64 baseline
+
+The native-32x32 Corr1S diagnostic run is not used in the main ablation table.
+The corrected Corr1S-S4 baseline keeps Stage4-only DetGeo-style Q-S matching
+at `z4 [768,32,32]`, then applies `ConvTranspose2d(768,384,k=4,s=2,p=1)` to
+obtain `[384,64,64]`, followed by one `Conv1x1(384,45)` detector head.
+Query input remains current PE plus distance.  It has no Stage3 matching,
+Direct-CA, Bi-Guidance, CSFI, AMHCSFI-Res, dual-head selector, or auxiliary
+guidance loss.
