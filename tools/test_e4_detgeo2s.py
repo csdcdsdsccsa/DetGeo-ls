@@ -1,4 +1,6 @@
 """Topology and numerical smoke checks for the two-scale DetGeo baseline."""
+import argparse
+
 import torch
 
 from model.TROGeo_ms_detection_ablation import (
@@ -7,6 +9,14 @@ from model.TROGeo_ms_detection_ablation import (
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--data_name',
+        choices=('CVOGL_DroneAerial', 'CVOGL_SVI'),
+        default='CVOGL_DroneAerial',
+        help='Select the query aspect ratio used by the structural check.',
+    )
+    args = parser.parse_args()
     torch.manual_seed(2024)
     model = TROGeoMSDetectionAblation(variant='h2_ind_detgeo2s', position_mode='current').train()
     required = ('det_head_stage3', 'stage4_align', 'det_head_stage4')
@@ -14,8 +24,10 @@ def main():
               'cross_scale_interaction', 'amhcsfi_res_refiner')
     if any(not hasattr(model, name) for name in required) or any(hasattr(model, name) for name in absent):
         raise RuntimeError('DetGeo2S topology is not a strict no-guidance two-head baseline')
-    q3, r3 = torch.randn(2, 384, 16, 16), torch.randn(2, 384, 64, 64)
-    q4, r4 = torch.randn(2, 768, 8, 8), torch.randn(2, 768, 32, 32)
+    q3_hw, q4_hw = ((16, 16), (8, 8)) if args.data_name == 'CVOGL_DroneAerial' \
+        else ((16, 32), (8, 16))
+    q3, r3 = torch.randn(2, 384, *q3_hw), torch.randn(2, 384, 64, 64)
+    q4, r4 = torch.randn(2, 768, *q4_hw), torch.randn(2, 768, 32, 32)
     z3, attn3 = detgeo_spatial_fusion(q3, r3)
     z4, attn4 = detgeo_spatial_fusion(q4, r4)
     if tuple(z3.shape) != (2, 384, 64, 64) or tuple(attn3.shape) != (2, 64, 64):
@@ -28,7 +40,11 @@ def main():
     if tuple(p3.shape) != (2, 45, 64, 64) or tuple(p4.shape) != (2, 45, 64, 64):
         raise RuntimeError('DetGeo2S two-head shapes are invalid')
     (p3.mean() + p4.mean()).backward()
-    print('DetGeo2S sanity passed: DirectCA=no BiGuidance=no CSFI=no AuxLoss=no TwoHeads=yes')
+    print(
+        'DetGeo2S sanity passed: data={} q3={} q4={} r3={} r4={} p3={} p4={} '
+        'DirectCA=no BiGuidance=no CSFI=no AuxLoss=no TwoHeads=yes'.format(
+            args.data_name, tuple(q3.shape), tuple(q4.shape), tuple(r3.shape), tuple(r4.shape),
+            tuple(p3.shape), tuple(p4.shape)))
 
 
 if __name__ == '__main__':

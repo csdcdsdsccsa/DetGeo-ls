@@ -558,3 +558,14 @@ obtain `[384,64,64]`, followed by one `Conv1x1(384,45)` detector head.
 Query input remains current PE plus distance.  It has no Stage3 matching,
 Direct-CA, Bi-Guidance, CSFI, AMHCSFI-Res, dual-head selector, or auxiliary
 guidance loss.
+
+# Two-scale DetGeo / CVOGL_SVI
+
+Dataset: `CVOGL_SVI`. Variant: `h2_ind_detgeo2s`; shared Swin-T backbone;
+current PE plus distance map. Stage3 and Stage4 each use DetGeo-style normalized
+cosine spatial attention and their own 9-anchor 64x64 detector head; inference
+uses the ordinary confidence selector. Direct-CA, Bi-Guidance, CSFI,
+AMHCSFI-Res, auxiliary guidance losses, fusion decoding, and quality/ranking
+heads are disabled. This is an SVI-only data migration of the DroneAerial
+natural-RNG baseline: seed 2024, batch 7, workers 24, 25 epochs and `lr=1e-4`.
+Validation Acc@0.50 selects the checkpoint, which is tested once.
