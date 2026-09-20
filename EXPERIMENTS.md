@@ -653,3 +653,20 @@ logits, and their losses are absent. The 010/011 rows use
 `h2_ind_detgeo2s_amhcsfi_res`; 001 uses `h2_ind_detgeo2s`; 101 uses
 `h2_ind_bi_nocsfi`. No RNG padding, RNG state save/restore, private module
 seeds, or cross-model initialization matching is used.
+
+# Full Model ResNet-50 backbone ablation
+
+The Full Model backbone comparison keeps Bi-Guidance, AMHCSFI-Res, dual heads,
+losses, confidence selection, shared-weight query/satellite encoding, and all
+training settings fixed. ResNet-50 exposes `layer3`/`layer4` and uses only two
+new 1x1 channel adapters: `1024->384` and `2048->768`. This preserves the
+existing downstream Full Model interface without redesigning Direct-CA or CSFI.
+Both encoders use ImageNet pretrained weights; the two adapters train from
+scratch under ordinary `--standard_rng`.
+
+| Dataset | Backbone | Stage3 interface | Stage4 interface | CRGPE core / outer |
+|---|---|---|---|---|
+| DroneAerial | Swin-T | 384 | 768 | 25x25 / 50x50 |
+| DroneAerial | ResNet-50 | 1024->384 | 2048->768 | 25x25 / 50x50 |
+| CVOGL_SVI | Swin-T | 384 | 768 | 25x50 / 50x100 |
+| CVOGL_SVI | ResNet-50 | 1024->384 | 2048->768 | 25x50 / 50x100 |

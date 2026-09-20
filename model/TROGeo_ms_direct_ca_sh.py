@@ -59,6 +59,45 @@ class SwinSMultiStageEncoder(nn.Module):
         return stage3, stage4
 
 
+class ResNet50MultiStageEncoder(nn.Module):
+    """Shared ImageNet ResNet-50 with the Full Model's 384/768 interface."""
+
+    def __init__(self):
+        super().__init__()
+        base = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+        self.conv1 = base.conv1
+        self.bn1 = base.bn1
+        self.relu = base.relu
+        self.maxpool = base.maxpool
+        self.layer1 = base.layer1
+        self.layer2 = base.layer2
+        self.layer3 = base.layer3
+        self.layer4 = base.layer4
+        # The only new backbone-specific parameters: downstream modules retain
+        # their unchanged 384/768 feature interfaces.
+        self.stage3_projection = nn.Conv2d(1024, 384, kernel_size=1)
+        self.stage4_projection = nn.Conv2d(2048, 768, kernel_size=1)
+        self._logged_sanity = False
+
+    def forward(self, x):
+        x = self.maxpool(self.relu(self.bn1(self.conv1(x))))
+        x = self.layer2(self.layer1(x))
+        raw_stage3 = self.layer3(x)
+        raw_stage4 = self.layer4(raw_stage3)
+        stage3 = self.stage3_projection(raw_stage3)
+        stage4 = self.stage4_projection(raw_stage4)
+        if stage3.shape[1] != 384 or stage4.shape[1] != 768:
+            raise RuntimeError('ResNet50 requires projected Stage3/Stage4 channels 384/768, got {}/{}'.format(
+                stage3.shape[1], stage4.shape[1]))
+        if not self._logged_sanity:
+            print('[ResNet50MultiStageEncoder sanity] shared_encoder=True '
+                  'raw_stage3={} projected_stage3={} raw_stage4={} projected_stage4={}'.format(
+                      tuple(raw_stage3.shape), tuple(stage3.shape),
+                      tuple(raw_stage4.shape), tuple(stage4.shape)), flush=True)
+            self._logged_sanity = True
+        return stage3, stage4
+
+
 class TROGeoMSDirectCASH(nn.Module):
     """Swin-T stage-3/stage-4 Direct-CA with separate 6/3-anchor heads."""
 
