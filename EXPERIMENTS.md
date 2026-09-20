@@ -623,3 +623,33 @@ their logits are absent.  Stage3 and Stage4 instead use the same parameter-free
 DetGeo spatial matching as `h2_ind_detgeo2s`, followed by independent heads
 and ordinary confidence selection.  The 010/011 rows add only AMHCSFI-Res
 after that matching through `h2_ind_detgeo2s_amhcsfi_res`.
+
+# CVOGL_SVI three-module full-factorial ablation
+
+The three modules use the same definitions as DroneAerial: **B** is Direct-CA
+plus bidirectional coarse/fine guidance and its auxiliary losses, **A** is
+AMHCSFI-Res, and **H** is HiSym-CRGPE. All SVI runs use shared Swin-T, 1024
+input, batch 7, 24 workers, 25 epochs, `lr=1e-4`, and
+`--standard_rng --seed 2024`. Validation Acc@0.50 selects one checkpoint for
+the single final test pass.
+
+H=0 uses current PE plus a distance map. H=1 uses SVI's anisotropic
+HiSym-CRGPE: core `(sigma_y, sigma_x)=(25,50)` and outer `(50,100)`.
+
+| Code | Experiment | B | A | H |
+|---|---|---:|---:|---:|
+| 000 | Two-scale DetGeo + current PE | 0 | 0 | 0 |
+| 001 | Two-scale DetGeo + HiSym-CRGPE | 0 | 0 | 1 |
+| 010 | Two-scale DetGeo + AMHCSFI-Res + current PE | 0 | 1 | 0 |
+| 011 | Two-scale DetGeo + AMHCSFI-Res + HiSym-CRGPE | 0 | 1 | 1 |
+| 100 | Bi-NoCSFI + current PE | 1 | 0 | 0 |
+| 101 | Bi-Guidance + HiSym-CRGPE | 1 | 0 | 1 |
+| 110 | Bi-Res + current PE | 1 | 1 | 0 |
+| 111 | Full Model + HiSym-CRGPE | 1 | 1 | 1 |
+
+For B=0, Stage3/Stage4 use parameter-free DetGeo spatial matching and
+ordinary confidence selection; Direct-CA, bidirectional guidance, their
+logits, and their losses are absent. The 010/011 rows use
+`h2_ind_detgeo2s_amhcsfi_res`; 001 uses `h2_ind_detgeo2s`; 101 uses
+`h2_ind_bi_nocsfi`. No RNG padding, RNG state save/restore, private module
+seeds, or cross-model initialization matching is used.
