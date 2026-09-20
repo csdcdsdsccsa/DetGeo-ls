@@ -332,11 +332,13 @@ def select_three_heads(pred2, pred3, pred4, anchors, image_wh):
     return selected, diagnostics
 
 
-def eval_decoded_boxes(pred_bbox, target_bbox, image_wh):
+def eval_decoded_boxes(pred_bbox, target_bbox, image_wh, grid_size=None):
     iou = bbox_iou(pred_bbox, target_bbox, x1y1x2y2=True)
     pred_center = (pred_bbox[:, :2] + pred_bbox[:, 2:4]) * 0.5
     target_center = (target_bbox[:, :2] + target_bbox[:, 2:4]) * 0.5
-    pred_grid = (pred_center / (image_wh // 64)).long()
-    target_grid = (target_center / (image_wh // 64)).long()
+    grid_size = image_wh // 16 if grid_size is None else grid_size
+    cell_size = float(image_wh) / float(grid_size)
+    pred_grid = (pred_center / cell_size).long()
+    target_grid = (target_center / cell_size).long()
     return iou.gt(0.5).float().mean(), iou.gt(0.25).float().mean(), iou.mean(), \
         ((pred_grid == target_grid).all(dim=1)).float().mean()

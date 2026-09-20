@@ -1144,8 +1144,8 @@ class TROGeoMSDetectionAblation(nn.Module):
             r3, r4 = self.encoder(reference_imgs)
         self._expect('query stage3', q3, 384, query_input.shape[-2] // 16, query_input.shape[-1] // 16)
         self._expect('query stage4', q4, 768, query_input.shape[-2] // 32, query_input.shape[-1] // 32)
-        self._expect('satellite stage3', r3, 384, 64, 64)
-        self._expect('satellite stage4', r4, 768, 32, 32)
+        self._expect('satellite stage3', r3, 384, reference_imgs.shape[-2] // 16, reference_imgs.shape[-1] // 16)
+        self._expect('satellite stage4', r4, 768, reference_imgs.shape[-2] // 32, reference_imgs.shape[-1] // 32)
         if self.dadpe_mode == 'multiscale':
             q3, q4, dadpe_p3, dadpe_p4 = self.multiscale_direction_residual(q3, q4, geometry)
         if self.variant in self.DETGEO_SINGLE_STAGE4_VARIANTS:
@@ -1326,12 +1326,15 @@ class TROGeoMSDetectionAblation(nn.Module):
             predictions = {'stage3': p3, 'coarse_logits': coarse_logits}
         else:
             aligned4 = self.stage4_align(z4)
+            if aligned4.shape[-2:] != z3.shape[-2:]:
+                raise RuntimeError('aligned Stage4 grid {} must match Stage3 grid {}'.format(
+                    tuple(aligned4.shape[-2:]), tuple(z3.shape[-2:])))
             if self.variant == 'h2_shared':
                 p3, p4 = self.det_head_shared(z3), self.det_head_shared(aligned4)
             else:
                 p3, p4 = self.det_head_stage3(z3), self.det_head_stage4(aligned4)
-            self._expect('H p3', p3, 45, 64, 64)
-            self._expect('H p4', p4, 45, 64, 64)
+            self._expect('H p3', p3, 45, z3.shape[-2], z3.shape[-1])
+            self._expect('H p4', p4, 45, z3.shape[-2], z3.shape[-1])
             predictions = {'stage3': p3, 'stage4': p4}
             if self.enable_acr:
                 # Features are inputs to the trainable ACR head only.  The

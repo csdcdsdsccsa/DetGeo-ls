@@ -23,6 +23,7 @@ from torchvision.transforms import Compose, ToTensor, Normalize
 
 from dataset.data_loader import RSDataset
 from dataset.trogeo_loader import TROGeoRSDataset
+from dataset.vigor_building_loader import VigorBuildingDataset
 from dataset.trogeo_sam_mask_loader import TROGeoSAMMaskDataset
 from model.DetGeo import DetGeo
 from dataset.sam_prompt_loader import SAMPromptDataset
@@ -93,12 +94,20 @@ def main():
 
     parser.add_argument('--max_epoch', default=25, type=int, help='training epoch')
     parser.add_argument('--lr', default=1e-4, type=float, help='learning rate')
+    parser.add_argument('--trogeo_optimizer', choices=('adam', 'adamw'), default='adam',
+                        help='optimizer for TROGeo multi-scale detector modes')
+    parser.add_argument('--train_weight_decay', default=5e-4, type=float,
+                        help='weight decay when --trogeo_optimizer adamw')
     parser.add_argument('--prompt_lr', default=1e-4, type=float, help='learning rate for the newly initialized PromptFusion')
     parser.add_argument('--batch_size', default=12, type=int, help='batch size')
     parser.add_argument('--emb_size', default=512, type=int, help='embedding dimensions')
     parser.add_argument('--img_size', default=1024, type=int, help='image size')
     parser.add_argument('--data_root', type=str, default='./data', help='path to the root folder of all dataset')
-    parser.add_argument('--data_name', default='CVOGL_DroneAerial', type=str, help='CVOGL_DroneAerial/CVOGL_SVI')
+    parser.add_argument('--data_name', default='CVOGL_DroneAerial', type=str,
+                        help='CVOGL_DroneAerial/CVOGL_SVI/VIGOR_Building')
+    parser.add_argument('--train_pth', default='', type=str, help='fixed VIGOR-Building train split')
+    parser.add_argument('--val_pth', default='', type=str, help='fixed VIGOR-Building validation split')
+    parser.add_argument('--test_pth', default='', type=str, help='fixed VIGOR-Building test split')
     parser.add_argument('--pretrain', default='', type=str, metavar='PATH')
     parser.add_argument('--resume', default='', type=str, metavar='PATH',
                         help='resume model, optimizer and epoch from a training checkpoint')
@@ -428,6 +437,21 @@ def main():
             parser.error('CRGPE outer sigma_y must be > core sigma_y')
         if outer_x <= core_x:
             parser.error('CRGPE outer sigma_x must be > core sigma_x')
+    if args.data_name == 'VIGOR_Building':
+        if not trogeo_mode or args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
+            parser.error('VIGOR_Building is currently restricted to Full Model h2_ind_amhcsfi_res_bi')
+        if args.trogeo_backbone != 'swin_t' or args.trogeo_position_mode != 'hisym_crgpe' or \
+                args.trogeo_click_map_mode != 'gaussian':
+            parser.error('VIGOR_Building requires Swin-T Full Model with Gaussian HiSym-CRGPE')
+        if args.img_size != 640 or args.gaussian_sigma != 25.0 or \
+                (args.gaussian_sigma_x is None or args.gaussian_sigma_x != 50.0) or \
+                args.crgpe_outer_sigma != 50.0 or (args.crgpe_outer_sigma_x is None or args.crgpe_outer_sigma_x != 100.0):
+            parser.error('VIGOR_Building requires img_size=640 and CRGPE sigmas core=25x50, outer=50x100')
+        if args.trogeo_optimizer != 'adamw' or args.train_weight_decay != 5e-4:
+            parser.error('VIGOR_Building protocol requires AdamW with weight_decay=5e-4')
+        for label, split_path in (('train', args.train_pth), ('val', args.val_pth), ('test', args.test_pth)):
+            if not split_path or not os.path.isfile(split_path):
+                parser.error('VIGOR_Building requires existing --{}_pth, got {!r}'.format(label, split_path))
     elif args.gaussian_sigma_x is not None or args.crgpe_outer_sigma_x is not None:
         parser.error('anisotropic Gaussian sigma parameters are restricted to HiSym-CRGPE')
     if args.bbox_threshold_reg:
@@ -586,6 +610,8 @@ def main():
         anchors = '37,41, 78,84, 96,215, 129,129, 194,82, 198,179, 246,280, 395,342, 550,573'
     elif args.data_name == 'CVOGL_SVI':
         anchors = '37,41, 78,84, 96,215, 129,129, 194,82, 198,179, 246,280, 395,342, 550,573'
+    elif args.data_name == 'VIGOR_Building':
+        anchors = '137,82, 144,164, 479,243, 255,537, 73,202, 242,117, 175,359, 259,260, 74,108'
     else:
         assert(False)
     args.anchors = anchors
@@ -637,20 +663,28 @@ def main():
     else:
         dataset_class = RSDataset
         prompt_kwargs = {}
-    train_dataset = dataset_class(data_root=args.data_root,
+    if args.data_name == 'VIGOR_Building':
+        vigor_kwargs = dict(data_root=args.data_root, img_size=args.img_size, ground_size=(512, 256),
+                            transform=input_transform, gaussian_sigma=args.gaussian_sigma,
+                            gaussian_sigma_x=args.gaussian_sigma_x)
+        train_dataset = VigorBuildingDataset(split_pth=args.train_pth, augment=True, **vigor_kwargs)
+        val_dataset = VigorBuildingDataset(split_pth=args.val_pth, augment=False, **vigor_kwargs)
+        test_dataset = VigorBuildingDataset(split_pth=args.test_pth, augment=False, **vigor_kwargs)
+    else:
+        train_dataset = dataset_class(data_root=args.data_root,
                          data_name=args.data_name,
                          split_name='train',
                          img_size=args.img_size,
                          transform=input_transform,
                          augment=True,
                          **({'aug_mode': args.trogeo_aug_mode} if trogeo_mode else {}), **prompt_kwargs)
-    val_dataset = dataset_class(data_root=args.data_root,
+        val_dataset = dataset_class(data_root=args.data_root,
                          data_name=args.data_name,
                          split_name='val',
                          img_size = args.img_size,
                          transform=input_transform,
                          **({'aug_mode': args.trogeo_aug_mode} if trogeo_mode else {}), **prompt_kwargs)
-    test_dataset = dataset_class(data_root=args.data_root,
+        test_dataset = dataset_class(data_root=args.data_root,
                          data_name=args.data_name,
                          split_name='test',
                          img_size = args.img_size,
@@ -663,7 +697,8 @@ def main():
         # Both retain DetGeo's ordinary DataLoader construction.
         # P10 deliberately reproduces DetGeo's original default DataLoader RNG.
         train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
-        eval_loader_kwargs = dict(loader_kwargs, batch_size=args.batch_size * 2) if trogeo_mode else loader_kwargs
+        eval_loader_kwargs = (dict(loader_kwargs, batch_size=args.batch_size * 2)
+                              if trogeo_mode and args.data_name != 'VIGOR_Building' else loader_kwargs)
         val_loader = DataLoader(val_dataset, shuffle=False, **eval_loader_kwargs)
         test_loader = DataLoader(test_dataset, shuffle=False, **eval_loader_kwargs)
     else:
@@ -814,7 +849,10 @@ def main():
         optimizer = torch.optim.Adam(model.module.head_prediction_quality_ranker.parameters(), lr=args.hqs_lr,
                                      betas=(0.9, 0.999))
     elif trogeo_mode:
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
+        optimizer = (torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999),
+                                       weight_decay=args.train_weight_decay)
+                     if args.trogeo_optimizer == 'adamw' else
+                     torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999)))
     elif args.sam_prompt or args.adaptive_sam_prompt or args.sam_refined_pe or args.rgbp_interaction or args.hisym_pae or args.adaptive_gaussian_field:
         prompt_params, base_params = [], []
         for name, parameter in model.named_parameters():
@@ -943,6 +981,12 @@ def get_rccd_weight(epoch, args):
 def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, include_loss=True):
     """Return decoded final boxes and, during training, the matching loss terms."""
     variant = args.trogeo_ms_det_variant
+    def reshape_yolo_prediction(prediction):
+        if prediction.ndim != 4 or prediction.shape[1] != 45:
+            raise RuntimeError('expected [B,45,H,W] prediction, got {}'.format(tuple(prediction.shape)))
+        if prediction.shape[-2] != prediction.shape[-1]:
+            raise RuntimeError('YOLO detection grid must be square, got {}'.format(tuple(prediction.shape[-2:])))
+        return prediction.view(prediction.shape[0], 9, 5, prediction.shape[-2], prediction.shape[-1])
     coarse_variants = ('h2_ind_cg', 'h2_ind_csfi_cg', 'h2_ind_hier', 'h2_ind_cg_amhcsfi_res',
                        'h2_ind_csfi_cg_channel', 'h2_ind_csfi_cg_dir', 'h2_ind_csfi_cg_ar',
                        'h2_ind_cg_habr_prior')
@@ -1110,8 +1154,8 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
         final_box, _ = decode_top1(p3, anchors_full, args.img_size)
         diagnostics = {}
     else:
-        p3 = predictions['stage3'].view(predictions['stage3'].shape[0], 9, 5, 64, 64)
-        p4 = predictions['stage4'].view(predictions['stage4'].shape[0], 9, 5, 64, 64)
+        p3 = reshape_yolo_prediction(predictions['stage3'])
+        p4 = reshape_yolo_prediction(predictions['stage4'])
         if include_loss:
             if args.bbox_threshold_reg:
                 loss_geo, loss_cls = two_head_yolo_threshold_reg_loss(
@@ -1553,7 +1597,8 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
                 attach_qcc_rank_logit(model, prediction_output, anchors_full, args)
             loss_geo, loss_cls, loss_aux, qcc_losses, final_box, _ = _ms_predictions_and_loss(
                 prediction_output, ori_gt_bbox, anchors_full, args, include_loss=True)
-            accu, _, iou, accu_center = eval_decoded_boxes(final_box, ori_gt_bbox, args.img_size)
+            accu, _, iou, accu_center = eval_decoded_boxes(
+                final_box, ori_gt_bbox, args.img_size, grid_size=prediction_output['stage3'].shape[-1])
             if args.rccd:
                 current_rccd_weight = get_rccd_weight(epoch, args)
                 if current_rccd_weight > 0.0:
@@ -1706,7 +1751,8 @@ def test_epoch(data_loader, model, args):
                 else:
                     _, _, _, _, final_box, diagnostics = _ms_predictions_and_loss(
                         prediction_output, ori_gt_bbox, anchors_full, args, include_loss=False)
-                accu50, accu25, iou, accu_center = eval_decoded_boxes(final_box, ori_gt_bbox, args.img_size)
+                accu50, accu25, iou, accu_center = eval_decoded_boxes(
+                    final_box, ori_gt_bbox, args.img_size, grid_size=prediction_output['stage3'].shape[-1])
                 accu_list = [accu50, accu25]
                 for name, value in diagnostics.items():
                     diagnostic_meters.setdefault(name, AverageMeter()).update(float(value), query_imgs.shape[0])

@@ -56,7 +56,10 @@ def multigrid_yolo_loss(pred3, pred4, ori_gt_bboxes, anchors_full, image_wh):
 
 
 def two_head_yolo_loss(pred3, pred4, ori_gt_bboxes, anchors_full, image_wh):
-    target, best = build_target(ori_gt_bboxes, anchors_full, image_wh, 64)
+    if pred3.shape[-2:] != pred4.shape[-2:] or pred3.shape[-2] != pred3.shape[-1]:
+        raise ValueError('two heads require the same square grid, got {} and {}'.format(
+            tuple(pred3.shape[-2:]), tuple(pred4.shape[-2:])))
+    target, best = build_target(ori_gt_bboxes, anchors_full, image_wh, pred3.shape[-1])
     geo3, cls3 = yolo_loss(pred3, target, anchors_full, best, image_wh)
     geo4, cls4 = yolo_loss(pred4, target, anchors_full, best, image_wh)
     return 0.5 * (geo3 + geo4), 0.5 * (cls3 + cls4)
@@ -110,7 +113,10 @@ def two_head_yolo_threshold_reg_loss(pred3, pred4, ori_gt_bboxes, anchors_full, 
     """Unchanged two-head YOLO loss plus a positive-candidate threshold regularizer."""
     if reg_weight < 0.0:
         raise ValueError('reg_weight must be >= 0')
-    target, best = build_target(ori_gt_bboxes, anchors_full, image_wh, 64)
+    if pred3.shape[-2:] != pred4.shape[-2:] or pred3.shape[-2] != pred3.shape[-1]:
+        raise ValueError('two heads require the same square grid, got {} and {}'.format(
+            tuple(pred3.shape[-2:]), tuple(pred4.shape[-2:])))
+    target, best = build_target(ori_gt_bboxes, anchors_full, image_wh, pred3.shape[-1])
     geo3_mse, cls3 = yolo_loss(pred3, target, anchors_full, best, image_wh)
     geo4_mse, cls4 = yolo_loss(pred4, target, anchors_full, best, image_wh)
     iou3 = positive_box_iou(pred3, ori_gt_bboxes, anchors_full, best, image_wh)
