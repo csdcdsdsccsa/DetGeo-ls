@@ -350,10 +350,17 @@ def main():
     trogeo_mode = any(trogeo_experiments)
     if args.trogeo_ms_direct_ca_sh and args.trogeo_backbone != 'swin_t':
         parser.error('--trogeo_ms_direct_ca_sh currently requires --trogeo_backbone swin_t')
-    if args.trogeo_ms_det_variant != 'none' and args.trogeo_backbone not in ('swin_t', 'vit_t', 'vit_s'):
-        parser.error('--trogeo_ms_det_variant requires --trogeo_backbone swin_t/vit_t/vit_s')
+    if args.trogeo_ms_det_variant != 'none' and args.trogeo_backbone not in ('swin_t', 'swin_s', 'vit_t', 'vit_s'):
+        parser.error('--trogeo_ms_det_variant requires --trogeo_backbone swin_t/swin_s/vit_t/vit_s')
     if args.trogeo_backbone in ('vit_t', 'vit_s') and args.trogeo_ms_det_variant != 'h2_ind':
         parser.error('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
+    if args.trogeo_backbone == 'swin_s':
+        if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
+            parser.error('Swin-S MS experiment is restricted to Full Model h2_ind_amhcsfi_res_bi')
+        if args.trogeo_position_mode != 'hisym_crgpe' or args.trogeo_click_map_mode != 'gaussian':
+            parser.error('Swin-S Full Model backbone ablation requires HiSym-CRGPE with a Gaussian click map')
+        if args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
+            parser.error('Swin-S Full Model backbone ablation requires dadpe=none and amr=none')
     if args.dadpe_mode != 'none':
         if args.trogeo_ms_det_variant not in ('h2_ind_csfi_bi', 'h2_ind_fg_amhcsfi_res',
                                                'h2_ind_amhcsfi_res_bi'):
@@ -402,10 +409,12 @@ def main():
             'h2_ind_bi_nocsfi', 'h2_ind_amhcsfi_res_bi',
             'h2_ind_amhcsfi_res_bi_qcc_af',
         )
+        crgpe_backbone_ok = args.trogeo_backbone == 'swin_t' or (
+            args.trogeo_backbone == 'swin_s' and args.trogeo_ms_det_variant == 'h2_ind_amhcsfi_res_bi')
         if args.trogeo_ms_det_variant not in hisym_crgpe_supported_variants or \
-                args.trogeo_backbone != 'swin_t' or args.trogeo_click_map_mode != 'gaussian' or \
+                not crgpe_backbone_ok or args.trogeo_click_map_mode != 'gaussian' or \
                 args.gaussian_sigma <= 0 or args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
-            parser.error('HiSym-CRGPE requires a supported two-scale variant, Swin-T, Gaussian map, positive sigma, dadpe=none, and amr=none')
+            parser.error('HiSym-CRGPE requires a supported configuration; Swin-S is restricted to the Full Model backbone ablation')
         core_x = args.gaussian_sigma if args.gaussian_sigma_x is None else args.gaussian_sigma_x
         outer_x = args.crgpe_outer_sigma if args.crgpe_outer_sigma_x is None else args.crgpe_outer_sigma_x
         if args.crgpe_outer_sigma <= args.gaussian_sigma:

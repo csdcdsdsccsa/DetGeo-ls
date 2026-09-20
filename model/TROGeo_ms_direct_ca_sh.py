@@ -34,6 +34,31 @@ class SwinTMultiStageEncoder(nn.Module):
         return stage3, stage4
 
 
+class SwinSMultiStageEncoder(nn.Module):
+    """One shared Swin-S forward exposing the same Stage3/Stage4 interface."""
+
+    def __init__(self):
+        super().__init__()
+        self.features = models.swin_s(
+            weights=models.Swin_S_Weights.IMAGENET1K_V1
+        ).features
+
+    def forward(self, x):
+        stage3 = None
+        for index, layer in enumerate(self.features):
+            x = layer(x)
+            # torchvision Swin-S shares Swin-T's C=384 Stage3 interface.
+            if index == 5:
+                stage3 = x.permute(0, 3, 1, 2).contiguous()
+        if stage3 is None:
+            raise RuntimeError('Swin-S stage-3 feature was not produced')
+        stage4 = x.permute(0, 3, 1, 2).contiguous()
+        if stage3.shape[1] != 384 or stage4.shape[1] != 768:
+            raise RuntimeError('Swin-S requires Stage3/Stage4 channels 384/768, got {}/{}'.format(
+                stage3.shape[1], stage4.shape[1]))
+        return stage3, stage4
+
+
 class TROGeoMSDirectCASH(nn.Module):
     """Swin-T stage-3/stage-4 Direct-CA with separate 6/3-anchor heads."""
 

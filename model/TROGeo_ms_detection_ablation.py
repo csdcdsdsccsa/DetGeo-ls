@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
 
-from .TROGeo_ms_direct_ca_sh import SwinTMultiStageEncoder
+from .TROGeo_ms_direct_ca_sh import SwinTMultiStageEncoder, SwinSMultiStageEncoder
 from .TROGeo_wo_ost import double_conv
 from .detgeo_position_embedding import DetGeoPositionEmbedding
 from .dg_position_embedding import DGPositionEmbedding, DDGPositionEmbedding, RDGPositionEmbedding
@@ -670,12 +670,14 @@ class TROGeoMSDetectionAblation(nn.Module):
                  crgpe_outer_sigma=50.0, crgpe_outer_sigma_x=None,
                  enable_hqs=False, enable_hqs_v2a=False, enable_hqs_v2b=False, enable_acr=False):
         super().__init__()
-        if (emb_size != 768 or backbone not in ('swin_t', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
+        if (emb_size != 768 or backbone not in ('swin_t', 'swin_s', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
                 or position_mode not in ('current', 'detgeo', 'dg', 'ddg', 'rdg', 'hisym_pe', 'dgrpe',
                                           'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe', 'hisym_sggpe')):
             raise ValueError('requires emb_size=768, a supported backbone, and a valid MS variant')
         if backbone in ('vit_t', 'vit_s') and variant != 'h2_ind':
             raise ValueError('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
+        if backbone == 'swin_s' and (variant != 'h2_ind_amhcsfi_res_bi' or position_mode != 'hisym_crgpe'):
+            raise ValueError('Swin-S is restricted to the Full Model HiSym-CRGPE backbone ablation')
         if dadpe_mode not in ('none', 'input', 'multiscale'):
             raise ValueError('dadpe_mode must be none/input/multiscale')
         if dadpe_mode != 'none' and (variant not in self.DADPE_SUPPORTED_VARIANTS
@@ -693,9 +695,13 @@ class TROGeoMSDetectionAblation(nn.Module):
         if position_mode in ('hisym_pe', 'dgrpe', 'dgrpe_v2', 'hisym_agpe', 'hisym_dgpe', 'hisym_dcrgpe', 'hisym_sggpe') and (variant != 'h2_ind_amhcsfi_res_bi' or backbone != 'swin_t'
                                                        or dadpe_mode != 'none' or amr_pe_mode != 'none'):
             raise ValueError('HiSym-PE/DGRPE requires Bi-Res, Swin-T, dadpe=none, and amr=none')
-        if position_mode == 'hisym_crgpe' and (variant not in self.HISYM_CRGPE_SUPPORTED_VARIANTS or backbone != 'swin_t'
-                                                or dadpe_mode != 'none' or amr_pe_mode != 'none'):
-            raise ValueError('HiSym-CRGPE requires a supported two-scale variant, Swin-T, dadpe=none, and amr=none')
+        if position_mode == 'hisym_crgpe':
+            crgpe_backbone_ok = backbone == 'swin_t' or (
+                backbone == 'swin_s' and variant == 'h2_ind_amhcsfi_res_bi')
+            if (variant not in self.HISYM_CRGPE_SUPPORTED_VARIANTS or not crgpe_backbone_ok
+                    or dadpe_mode != 'none' or amr_pe_mode != 'none'):
+                raise ValueError('HiSym-CRGPE requires a supported configuration; '
+                                 'Swin-S is restricted to the Full Model backbone ablation')
         if position_mode in ('dgrpe', 'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe', 'hisym_sggpe') and gaussian_sigma <= 0:
             raise ValueError('DGRPE/Adaptive HiSym-GPE requires positive Gaussian sigma')
         self.variant = variant
@@ -720,6 +726,10 @@ class TROGeoMSDetectionAblation(nn.Module):
         self.need_query_stage2 = variant == 'h2_ind_le_stage2_res'
         if backbone in ('vit_t', 'vit_s'):
             self.encoder = TiledViTMultiStageEncoder(backbone)
+        elif backbone == 'swin_s':
+            if self.three_scale or self.need_query_stage2:
+                raise ValueError('Swin-S is implemented only for the two-scale Full Model backbone ablation')
+            self.encoder = SwinSMultiStageEncoder()
         else:
             self.encoder = (SwinTThreeStageEncoder() if (self.three_scale or self.need_query_stage2)
                             else SwinTMultiStageEncoder())
@@ -1372,13 +1382,19 @@ class TROGeoMSDetectionAblation(nn.Module):
                           tuple(r3.shape), tuple(r4.shape), tuple(z2.shape), tuple(z3.shape), tuple(z4.shape),
                           shapes, self._position_mode()), flush=True)
             else:
-                print('[TROGeo MS detection sanity] variant={} shared_encoder=True self_attention_stage3=False '
+                print('[TROGeo MS detection sanity] variant={} backbone={} shared_encoder=True self_attention_stage3=False '
                       'self_attention_stage4=False q3={} q4={} r3={} r4={} z3={} z4={} predictions={} '
                       'feature_fusion={} position_injection={} position_encoder={}'.format(
-                      self.variant, tuple(q3.shape), tuple(q4.shape),
+                      self.variant, self.backbone_name, tuple(q3.shape), tuple(q4.shape),
                       tuple(r3.shape), tuple(r4.shape), tuple(z3.shape), tuple(z4.shape), shapes,
                        self.variant in self.CSFI_VARIANTS or self.variant in self.ADAPTIVE_CSFI_VARIANTS or self.variant in self.MHCSFI_VARIANTS,
                        self._position_mode(), self.position_mode), flush=True)
+                if self.backbone_name == 'swin_s' and self.variant == 'h2_ind_amhcsfi_res_bi':
+                    print('[FullModel-SwinS sanity] backbone=swin_s variant=h2_ind_amhcsfi_res_bi '
+                          'position={} bi_guidance=True amhcsfi_res=True dual_head=True '
+                          'q3={} q4={} r3={} r4={}'.format(
+                              self.position_mode, tuple(q3.shape), tuple(q4.shape),
+                              tuple(r3.shape), tuple(r4.shape)), flush=True)
                 if self.dadpe_mode != 'none':
                     print('[DADPE sanity] mode={} geometry={} gamma={:.6f}'.format(
                         self.dadpe_mode, tuple(geometry.shape), self.input_direction_residual.gamma.item()), flush=True)
