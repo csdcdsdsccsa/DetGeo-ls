@@ -437,6 +437,9 @@ def main():
             parser.error('CRGPE outer sigma_y must be > core sigma_y')
         if outer_x <= core_x:
             parser.error('CRGPE outer sigma_x must be > core sigma_x')
+    if args.trogeo_position_mode != 'hisym_crgpe' and \
+            (args.gaussian_sigma_x is not None or args.crgpe_outer_sigma_x is not None):
+        parser.error('anisotropic Gaussian sigma parameters are restricted to HiSym-CRGPE')
     if args.data_name == 'VIGOR_Building':
         if not trogeo_mode or args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
             parser.error('VIGOR_Building is currently restricted to Full Model h2_ind_amhcsfi_res_bi')
@@ -452,8 +455,6 @@ def main():
         for label, split_path in (('train', args.train_pth), ('val', args.val_pth), ('test', args.test_pth)):
             if not split_path or not os.path.isfile(split_path):
                 parser.error('VIGOR_Building requires existing --{}_pth, got {!r}'.format(label, split_path))
-    elif args.gaussian_sigma_x is not None or args.crgpe_outer_sigma_x is not None:
-        parser.error('anisotropic Gaussian sigma parameters are restricted to HiSym-CRGPE')
     if args.bbox_threshold_reg:
         if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
             parser.error('--bbox_threshold_reg is restricted to Bi-Res h2_ind_amhcsfi_res_bi')
@@ -692,11 +693,12 @@ def main():
                          **({'aug_mode': args.trogeo_aug_mode} if trogeo_mode else {}), **prompt_kwargs)
     loader_kwargs = dict(batch_size=args.batch_size, pin_memory=True,
                          drop_last=False, num_workers=args.num_workers)
+    train_loader_kwargs = dict(loader_kwargs, drop_last=(args.data_name == 'VIGOR_Building'))
     if args.original_rng_matched or args.standard_rng:
         # P10 keeps its model-init RNG isolation; standard mode deliberately does not.
         # Both retain DetGeo's ordinary DataLoader construction.
         # P10 deliberately reproduces DetGeo's original default DataLoader RNG.
-        train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
+        train_loader = DataLoader(train_dataset, shuffle=True, **train_loader_kwargs)
         eval_loader_kwargs = (dict(loader_kwargs, batch_size=args.batch_size * 2)
                               if trogeo_mode and args.data_name != 'VIGOR_Building' else loader_kwargs)
         val_loader = DataLoader(val_dataset, shuffle=False, **eval_loader_kwargs)
@@ -709,7 +711,7 @@ def main():
         test_generator = torch.Generator()
         test_generator.manual_seed(args.loader_seed + 2)
         train_loader = DataLoader(train_dataset, shuffle=True, generator=train_generator,
-                                  worker_init_fn=seed_worker, **loader_kwargs)
+                                  worker_init_fn=seed_worker, **train_loader_kwargs)
         val_loader = DataLoader(val_dataset, shuffle=False, generator=val_generator,
                                 worker_init_fn=seed_worker, **loader_kwargs)
         test_loader = DataLoader(test_dataset, shuffle=False, generator=test_generator,
@@ -966,6 +968,14 @@ def forward_model(model, query_imgs, rs_imgs, original_click_map, prompt_maps):
 
 def is_ms_detection_variant(args):
     return args.trogeo_ms_det_variant != 'none'
+
+
+def detection_grid_size(predictions):
+    """Infer the decoded detector grid without assuming a two-head variant."""
+    for key in ('stage3', 'single', 'single_s4', 'joint'):
+        if key in predictions:
+            return predictions[key].shape[-1]
+    raise RuntimeError('cannot infer detection grid from prediction keys: {}'.format(sorted(predictions)))
 
 
 def get_rccd_weight(epoch, args):
@@ -1598,7 +1608,7 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
             loss_geo, loss_cls, loss_aux, qcc_losses, final_box, _ = _ms_predictions_and_loss(
                 prediction_output, ori_gt_bbox, anchors_full, args, include_loss=True)
             accu, _, iou, accu_center = eval_decoded_boxes(
-                final_box, ori_gt_bbox, args.img_size, grid_size=prediction_output['stage3'].shape[-1])
+                final_box, ori_gt_bbox, args.img_size, grid_size=detection_grid_size(prediction_output))
             if args.rccd:
                 current_rccd_weight = get_rccd_weight(epoch, args)
                 if current_rccd_weight > 0.0:
@@ -1752,7 +1762,7 @@ def test_epoch(data_loader, model, args):
                     _, _, _, _, final_box, diagnostics = _ms_predictions_and_loss(
                         prediction_output, ori_gt_bbox, anchors_full, args, include_loss=False)
                 accu50, accu25, iou, accu_center = eval_decoded_boxes(
-                    final_box, ori_gt_bbox, args.img_size, grid_size=prediction_output['stage3'].shape[-1])
+                    final_box, ori_gt_bbox, args.img_size, grid_size=detection_grid_size(prediction_output))
                 accu_list = [accu50, accu25]
                 for name, value in diagnostics.items():
                     diagnostic_meters.setdefault(name, AverageMeter()).update(float(value), query_imgs.shape[0])

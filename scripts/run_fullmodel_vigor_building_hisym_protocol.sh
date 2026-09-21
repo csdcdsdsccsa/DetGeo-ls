@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PYTHON_BIN="${PYTHON_BIN:-/root/miniconda3/envs/detgeo/bin/python}"
 DATA_ROOT="${VIGOR_DATA_ROOT:-data-1/VIGOR-Building}"
-NAME="trogeo_ms_vigor_building_full_hisym_crgpe_swin_t_seed13"
+NAME="trogeo_ms_vigor_building_full_hisym_crgpe_swin_t_seed13_v2"
 
 COMMON=(
   --gpu 0 --num_workers 24 --batch_size 12 --emb_size 768 --img_size 640
@@ -19,6 +19,7 @@ COMMON=(
 )
 
 PYTHONPATH=. "$PYTHON_BIN" tools/test_vigor_dynamic_grid.py
+PYTHONPATH=. "$PYTHON_BIN" tools/smoke_vigor_full_model.py
 PYTHONPATH=. "$PYTHON_BIN" train.py "${COMMON[@]}" --max_epoch 25 --savename "$NAME"
 PYTHONPATH=. "$PYTHON_BIN" train.py "${COMMON[@]}" --pretrain "saved_models/${NAME}_model_best.pth.tar" --test --savename "${NAME}_test"
 rm -f "saved_models/${NAME}_checkpoint.pth.tar"

@@ -2,6 +2,7 @@
 
 import os
 import xml.etree.ElementTree as ET
+from numbers import Integral
 
 import albumentations as A
 import cv2
@@ -57,7 +58,7 @@ class VigorBuildingDataset(Dataset):
             name, box = obj.findtext('name'), obj.find('bndbox')
             if name is None or box is None:
                 continue
-            objects.append((name, np.array([
+            objects.append((name.strip(), np.array([
                 float(box.findtext('xmin')), float(box.findtext('ymin')),
                 float(box.findtext('xmax')), float(box.findtext('ymax'))], dtype=np.float32)))
         return int(size.findtext('width')), int(size.findtext('height')), objects
@@ -70,9 +71,31 @@ class VigorBuildingDataset(Dataset):
     @staticmethod
     def _find_box(objects, name):
         for candidate, box in objects:
-            if candidate == name:
+            if candidate.strip() == name:
                 return box.copy()
         raise KeyError('target building {!r} is absent from paired satellite annotation'.format(name))
+
+    @staticmethod
+    def _resolve_target_name(target_idx, ground_objects, satellite_objects):
+        """Match HiSymGeo's name -> 1-based -> 0-based target resolution."""
+        target_name = str(target_idx).strip()
+        ground_names = {str(name).strip() for name, _ in ground_objects}
+        satellite_names = {str(name).strip() for name, _ in satellite_objects}
+        common_names = ground_names & satellite_names
+        if target_name in common_names:
+            return target_name
+
+        if isinstance(target_idx, Integral):
+            index = int(target_idx)
+            if 1 <= index <= len(ground_objects):
+                candidate = str(ground_objects[index - 1][0]).strip()
+                if candidate in common_names:
+                    return candidate
+            if 0 <= index < len(ground_objects):
+                candidate = str(ground_objects[index][0]).strip()
+                if candidate in common_names:
+                    return candidate
+        raise KeyError('cannot resolve target_idx={!r} against paired VOC objects'.format(target_idx))
 
     def _click_map(self, cx, cy):
         yy = np.arange(self.ground_h, dtype=np.float32)[:, None]
@@ -88,25 +111,22 @@ class VigorBuildingDataset(Dataset):
         satellite = self._read_rgb(os.path.join(sat_base, 'images', satellite_img))
         gw, gh, ground_objects = self._parse_voc_xml(os.path.join(ground_base, 'labels', ground_xml))
         sw, sh, satellite_objects = self._parse_voc_xml(os.path.join(sat_base, 'labels', satellite_xml))
-        # HiSymGeo's serialized VIGOR target_idx is a VOC-object ordinal
-        # (one-based), not a Python list index.
-        target_ordinal = int(target_idx)
-        if not 1 <= target_ordinal <= len(ground_objects):
-            raise IndexError('target_idx {} invalid for {} ground objects'.format(target_idx, len(ground_objects)))
-        target_name, ground_box = ground_objects[target_ordinal - 1]
+        target_name = self._resolve_target_name(target_idx, ground_objects, satellite_objects)
+        ground_box = self._find_box(ground_objects, target_name)
         sat_box = self._find_box(satellite_objects, target_name)
         ground = cv2.resize(ground, (self.ground_w, self.ground_h), interpolation=cv2.INTER_LINEAR)
         satellite = cv2.resize(satellite, (self.sat_size, self.sat_size), interpolation=cv2.INTER_LINEAR)
         ground_box = self._scale_box(ground_box, gw, gh, self.ground_w, self.ground_h)
         sat_box = self._scale_box(sat_box, sw, sh, self.sat_size, self.sat_size)
         if self.augment:
-            transformed = self.rs_transform(image=satellite, bboxes=[list(sat_box) + [target_name]])
+            transformed = self.rs_transform(image=satellite, bboxes=[sat_box.tolist()])
             satellite = transformed['image']
             if not transformed['bboxes']:
                 raise RuntimeError('VIGOR augmentation removed the target box')
             sat_box = np.asarray(transformed['bboxes'][0][:4], dtype=np.float32)
-        click = self._click_map(0.5 * (ground_box[0] + ground_box[2]),
-                                0.5 * (ground_box[1] + ground_box[3]))
+        cx = int(np.clip(np.rint(0.5 * (ground_box[0] + ground_box[2])), 0, self.ground_w - 1))
+        cy = int(np.clip(np.rint(0.5 * (ground_box[1] + ground_box[3])), 0, self.ground_h - 1))
+        click = self._click_map(cx, cy)
         if self.transform is not None:
             ground, satellite = self.transform(ground.copy()), self.transform(satellite.copy())
         return ground, satellite, torch.tensor(click), torch.tensor(sat_box), index
