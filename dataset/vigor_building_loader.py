@@ -35,7 +35,7 @@ class VigorBuildingDataset(Dataset):
             A.OneOf([A.Blur(p=0.4), A.MedianBlur(p=0.3)], p=0.5),
             A.OneOf([A.RandomBrightnessContrast(p=0.4), A.CLAHE(p=0.3)], p=0.5),
             A.ToGray(p=0.2), A.RandomGamma(p=0.3),
-        ], bbox_params=A.BboxParams(format='pascal_voc'))
+        ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['bbox_labels']))
 
     def __len__(self):
         return len(self.data_list)
@@ -119,7 +119,7 @@ class VigorBuildingDataset(Dataset):
         ground_box = self._scale_box(ground_box, gw, gh, self.ground_w, self.ground_h)
         sat_box = self._scale_box(sat_box, sw, sh, self.sat_size, self.sat_size)
         if self.augment:
-            transformed = self.rs_transform(image=satellite, bboxes=[sat_box.tolist()])
+            transformed = self.rs_transform(image=satellite, bboxes=[sat_box.tolist()], bbox_labels=[0])
             satellite = transformed['image']
             if not transformed['bboxes']:
                 raise RuntimeError('VIGOR augmentation removed the target box')
