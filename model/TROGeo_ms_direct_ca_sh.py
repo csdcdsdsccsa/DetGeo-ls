@@ -59,6 +59,44 @@ class SwinSMultiStageEncoder(nn.Module):
         return stage3, stage4
 
 
+class SwinBMultiStageEncoder(nn.Module):
+    """Shared ImageNet-pretrained Swin-B with the Full Model 384/768 interface."""
+
+    def __init__(self):
+        super().__init__()
+        self.features = models.swin_b(weights=models.Swin_B_Weights.IMAGENET1K_V1).features
+        # Keep every Full Model module unchanged by adapting only backbone outputs.
+        self.stage3_projection = nn.Conv2d(512, 384, kernel_size=1)
+        self.stage4_projection = nn.Conv2d(1024, 768, kernel_size=1)
+        self._logged_sanity = False
+
+    def forward(self, x):
+        raw_stage3 = None
+        for index, layer in enumerate(self.features):
+            x = layer(x)
+            # torchvision Swin-B features[5] is the 512-channel Stage3 output.
+            if index == 5:
+                raw_stage3 = x.permute(0, 3, 1, 2).contiguous()
+        if raw_stage3 is None:
+            raise RuntimeError('Swin-B stage-3 feature was not produced')
+        raw_stage4 = x.permute(0, 3, 1, 2).contiguous()
+        if raw_stage3.shape[1] != 512 or raw_stage4.shape[1] != 1024:
+            raise RuntimeError('Swin-B raw Stage3/Stage4 must be 512/1024, got {}/{}'.format(
+                raw_stage3.shape[1], raw_stage4.shape[1]))
+        stage3 = self.stage3_projection(raw_stage3)
+        stage4 = self.stage4_projection(raw_stage4)
+        if stage3.shape[1] != 384 or stage4.shape[1] != 768:
+            raise RuntimeError('Swin-B projected Stage3/Stage4 must be 384/768, got {}/{}'.format(
+                stage3.shape[1], stage4.shape[1]))
+        if not self._logged_sanity:
+            print('[SwinBMultiStageEncoder sanity] shared_encoder=True raw_stage3={} projected_stage3={} '
+                  'raw_stage4={} projected_stage4={}'.format(
+                      tuple(raw_stage3.shape), tuple(stage3.shape),
+                      tuple(raw_stage4.shape), tuple(stage4.shape)), flush=True)
+            self._logged_sanity = True
+        return stage3, stage4
+
+
 class ResNet50MultiStageEncoder(nn.Module):
     """Shared ImageNet ResNet-50 with the Full Model's 384/768 interface."""
 

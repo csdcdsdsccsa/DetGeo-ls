@@ -5,7 +5,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
 
-from .TROGeo_ms_direct_ca_sh import SwinTMultiStageEncoder, SwinSMultiStageEncoder, ResNet50MultiStageEncoder
+from .TROGeo_ms_direct_ca_sh import (
+    SwinTMultiStageEncoder, SwinSMultiStageEncoder, SwinBMultiStageEncoder,
+    ResNet50MultiStageEncoder,
+)
 from .TROGeo_wo_ost import double_conv
 from .detgeo_position_embedding import DetGeoPositionEmbedding
 from .dg_position_embedding import DGPositionEmbedding, DDGPositionEmbedding, RDGPositionEmbedding
@@ -670,14 +673,14 @@ class TROGeoMSDetectionAblation(nn.Module):
                  crgpe_outer_sigma=50.0, crgpe_outer_sigma_x=None,
                  enable_hqs=False, enable_hqs_v2a=False, enable_hqs_v2b=False, enable_acr=False):
         super().__init__()
-        if (emb_size != 768 or backbone not in ('swin_t', 'swin_s', 'resnet50', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
+        if (emb_size != 768 or backbone not in ('swin_t', 'swin_s', 'swin_b', 'resnet50', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
                 or position_mode not in ('current', 'detgeo', 'dg', 'ddg', 'rdg', 'hisym_pe', 'dgrpe',
                                           'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe', 'hisym_sggpe')):
             raise ValueError('requires emb_size=768, a supported backbone, and a valid MS variant')
         if backbone in ('vit_t', 'vit_s') and variant != 'h2_ind':
             raise ValueError('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
-        if backbone == 'swin_s' and (variant != 'h2_ind_amhcsfi_res_bi' or position_mode != 'hisym_crgpe'):
-            raise ValueError('Swin-S is restricted to the Full Model HiSym-CRGPE backbone ablation')
+        if backbone in ('swin_s', 'swin_b') and (variant != 'h2_ind_amhcsfi_res_bi' or position_mode != 'hisym_crgpe'):
+            raise ValueError('{} is restricted to the Full Model HiSym-CRGPE backbone ablation'.format(backbone))
         if backbone == 'resnet50' and (variant != 'h2_ind_amhcsfi_res_bi' or position_mode != 'hisym_crgpe'):
             raise ValueError('ResNet-50 is restricted to the Full Model HiSym-CRGPE backbone ablation')
         if dadpe_mode not in ('none', 'input', 'multiscale'):
@@ -699,11 +702,11 @@ class TROGeoMSDetectionAblation(nn.Module):
             raise ValueError('HiSym-PE/DGRPE requires Bi-Res, Swin-T, dadpe=none, and amr=none')
         if position_mode == 'hisym_crgpe':
             crgpe_backbone_ok = backbone == 'swin_t' or (
-                backbone in ('swin_s', 'resnet50') and variant == 'h2_ind_amhcsfi_res_bi')
+                backbone in ('swin_s', 'swin_b', 'resnet50') and variant == 'h2_ind_amhcsfi_res_bi')
             if (variant not in self.HISYM_CRGPE_SUPPORTED_VARIANTS or not crgpe_backbone_ok
                     or dadpe_mode != 'none' or amr_pe_mode != 'none'):
                 raise ValueError('HiSym-CRGPE requires a supported configuration; '
-                                 'Swin-S/ResNet-50 are restricted to the Full Model backbone ablation')
+                                 'Swin-S/Swin-B/ResNet-50 are restricted to the Full Model backbone ablation')
         if position_mode in ('dgrpe', 'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe', 'hisym_sggpe') and gaussian_sigma <= 0:
             raise ValueError('DGRPE/Adaptive HiSym-GPE requires positive Gaussian sigma')
         self.variant = variant
@@ -732,6 +735,10 @@ class TROGeoMSDetectionAblation(nn.Module):
             if self.three_scale or self.need_query_stage2:
                 raise ValueError('Swin-S is implemented only for the two-scale Full Model backbone ablation')
             self.encoder = SwinSMultiStageEncoder()
+        elif backbone == 'swin_b':
+            if self.three_scale or self.need_query_stage2:
+                raise ValueError('Swin-B is implemented only for the two-scale Full Model backbone ablation')
+            self.encoder = SwinBMultiStageEncoder()
         elif backbone == 'resnet50':
             if self.three_scale or self.need_query_stage2:
                 raise ValueError('ResNet-50 is implemented only for the two-scale Full Model backbone ablation')
@@ -1404,6 +1411,13 @@ class TROGeoMSDetectionAblation(nn.Module):
                     print('[FullModel-SwinS sanity] backbone=swin_s variant=h2_ind_amhcsfi_res_bi '
                           'position={} bi_guidance=True amhcsfi_res=True dual_head=True '
                           'q3={} q4={} r3={} r4={}'.format(
+                              self.position_mode, tuple(q3.shape), tuple(q4.shape),
+                              tuple(r3.shape), tuple(r4.shape)), flush=True)
+                if self.backbone_name == 'swin_b' and self.variant == 'h2_ind_amhcsfi_res_bi':
+                    print('[FullModel-SwinB sanity] backbone=swin_b shared_encoder=True '
+                          'stage3_adapter=512->384 stage4_adapter=1024->768 '
+                          'variant=h2_ind_amhcsfi_res_bi position={} bi_guidance=True '
+                          'amhcsfi_res=True dual_head=True q3={} q4={} r3={} r4={}'.format(
                               self.position_mode, tuple(q3.shape), tuple(q4.shape),
                               tuple(r3.shape), tuple(r4.shape)), flush=True)
                 if self.backbone_name == 'resnet50' and self.variant == 'h2_ind_amhcsfi_res_bi':
