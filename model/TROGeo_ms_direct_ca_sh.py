@@ -97,6 +97,31 @@ class SwinBMultiStageEncoder(nn.Module):
         return stage3, stage4
 
 
+class SwinBNativeMultiStageEncoder(nn.Module):
+    """Shared ImageNet-pretrained Swin-B exposing native 512/1024 features."""
+
+    def __init__(self):
+        super().__init__()
+        self.features = models.swin_b(
+            weights=models.Swin_B_Weights.IMAGENET1K_V1
+        ).features
+
+    def forward(self, x):
+        stage3 = None
+        for index, layer in enumerate(self.features):
+            x = layer(x)
+            if index == 5:
+                stage3 = x.permute(0, 3, 1, 2).contiguous()
+        if stage3 is None:
+            raise RuntimeError('Swin-B Native stage-3 feature was not produced')
+        stage4 = x.permute(0, 3, 1, 2).contiguous()
+        if stage3.shape[1] != 512 or stage4.shape[1] != 1024:
+            raise RuntimeError(
+                'Swin-B Native Stage3/Stage4 must be 512/1024, got {}/{}'.format(
+                    stage3.shape[1], stage4.shape[1]))
+        return stage3, stage4
+
+
 class ResNet50MultiStageEncoder(nn.Module):
     """Shared ImageNet ResNet-50 with the Full Model's 384/768 interface."""
 

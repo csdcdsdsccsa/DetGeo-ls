@@ -7,6 +7,7 @@ import torchvision.models as models
 
 from .TROGeo_ms_direct_ca_sh import (
     SwinTMultiStageEncoder, SwinSMultiStageEncoder, SwinBMultiStageEncoder,
+    SwinBNativeMultiStageEncoder,
     ResNet50MultiStageEncoder,
 )
 from .TROGeo_wo_ost import double_conv
@@ -201,27 +202,27 @@ class CrossScaleFeatureInteraction(nn.Module):
     from the original (not sequentially updated) maps.
     """
 
-    def __init__(self):
+    def __init__(self, c3=384, c4=768):
         super().__init__()
         self.proj_4to3 = nn.Sequential(
-            nn.Conv2d(768, 384, kernel_size=1, bias=False),
-            nn.GroupNorm(32, 384),
+            nn.Conv2d(c4, c3, kernel_size=1, bias=False),
+            nn.GroupNorm(32, c3),
             nn.GELU(),
         )
         self.gate3 = nn.Sequential(
-            nn.Conv2d(768, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.Conv2d(2 * c3, 64, kernel_size=3, stride=1, padding=1, bias=False),
             nn.GroupNorm(8, 64),
             nn.GELU(),
             nn.Conv2d(64, 1, kernel_size=1),
             nn.Sigmoid(),
         )
         self.proj_3to4 = nn.Sequential(
-            nn.Conv2d(384, 768, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.GroupNorm(32, 768),
+            nn.Conv2d(c3, c4, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.GroupNorm(32, c4),
             nn.GELU(),
         )
         self.gate4 = nn.Sequential(
-            nn.Conv2d(1536, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.Conv2d(2 * c4, 64, kernel_size=3, stride=1, padding=1, bias=False),
             nn.GroupNorm(8, 64),
             nn.GELU(),
             nn.Conv2d(64, 1, kernel_size=1),
@@ -294,11 +295,11 @@ class MultiHeadSpatialRelationMask(nn.Module):
 class MultiHeadCrossScaleFeatureInteraction(CrossScaleFeatureInteraction):
     """CSFI with MHSAM-inspired 1/3/5 relation masks inside each residual."""
 
-    def __init__(self, adaptive=False):
-        super().__init__()
+    def __init__(self, adaptive=False, c3=384, c4=768):
+        super().__init__(c3=c3, c4=c4)
         self.adaptive = adaptive
-        self.relation_mask3 = MultiHeadSpatialRelationMask(768, relation_dim=64, adaptive=adaptive)
-        self.relation_mask4 = MultiHeadSpatialRelationMask(1536, relation_dim=64, adaptive=adaptive)
+        self.relation_mask3 = MultiHeadSpatialRelationMask(2 * c3, relation_dim=64, adaptive=adaptive)
+        self.relation_mask4 = MultiHeadSpatialRelationMask(2 * c4, relation_dim=64, adaptive=adaptive)
 
     def forward(self, z3, z4):
         z4_to3, z3_to4, pair3, pair4, gate3, gate4 = self.components(z3, z4)
@@ -337,10 +338,10 @@ class AdaptiveMultiReceptiveMask(nn.Module):
 class ResidualAdaptiveMultiReceptiveCSFI(nn.Module):
     """Refine original CSFI gates without duplicating original CSFI parameters."""
 
-    def __init__(self):
+    def __init__(self, c3=384, c4=768):
         super().__init__()
-        self.mask3 = AdaptiveMultiReceptiveMask(768, relation_dim=64)
-        self.mask4 = AdaptiveMultiReceptiveMask(1536, relation_dim=64)
+        self.mask3 = AdaptiveMultiReceptiveMask(2 * c3, relation_dim=64)
+        self.mask4 = AdaptiveMultiReceptiveMask(2 * c4, relation_dim=64)
         self.refine_beta3 = nn.Parameter(torch.tensor(0.0))
         self.refine_beta4 = nn.Parameter(torch.tensor(0.0))
 
@@ -449,9 +450,9 @@ class AdaptiveCSFIReliability(nn.Module):
 class CoarseGuidance(nn.Module):
     """Use Stage4's cross-view response as a residual Stage3 search prior."""
 
-    def __init__(self):
+    def __init__(self, channels=768):
         super().__init__()
-        self.coarse_head = nn.Conv2d(768, 1, kernel_size=1)
+        self.coarse_head = nn.Conv2d(channels, 1, kernel_size=1)
         self.gamma = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, z4, r3):
@@ -465,9 +466,9 @@ class CoarseGuidance(nn.Module):
 class FineGuidance(nn.Module):
     """Use Stage3's cross-view response as a residual Stage4 search prior."""
 
-    def __init__(self):
+    def __init__(self, channels=384):
         super().__init__()
-        self.fine_head = nn.Conv2d(384, 1, kernel_size=1)
+        self.fine_head = nn.Conv2d(channels, 1, kernel_size=1)
         self.gamma = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, z3, r4):
@@ -673,13 +674,13 @@ class TROGeoMSDetectionAblation(nn.Module):
                  crgpe_outer_sigma=50.0, crgpe_outer_sigma_x=None,
                  enable_hqs=False, enable_hqs_v2a=False, enable_hqs_v2b=False, enable_acr=False):
         super().__init__()
-        if (emb_size != 768 or backbone not in ('swin_t', 'swin_s', 'swin_b', 'resnet50', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
+        if (emb_size != 768 or backbone not in ('swin_t', 'swin_s', 'swin_b', 'swin_b_native', 'resnet50', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
                 or position_mode not in ('current', 'detgeo', 'dg', 'ddg', 'rdg', 'hisym_pe', 'dgrpe',
                                           'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe', 'hisym_dgpe', 'hisym_dcrgpe', 'hisym_sggpe')):
             raise ValueError('requires emb_size=768, a supported backbone, and a valid MS variant')
         if backbone in ('vit_t', 'vit_s') and variant != 'h2_ind':
             raise ValueError('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
-        if backbone in ('swin_s', 'swin_b') and (variant != 'h2_ind_amhcsfi_res_bi' or position_mode != 'hisym_crgpe'):
+        if backbone in ('swin_s', 'swin_b', 'swin_b_native') and (variant != 'h2_ind_amhcsfi_res_bi' or position_mode != 'hisym_crgpe'):
             raise ValueError('{} is restricted to the Full Model HiSym-CRGPE backbone ablation'.format(backbone))
         if backbone == 'resnet50' and (variant != 'h2_ind_amhcsfi_res_bi' or position_mode != 'hisym_crgpe'):
             raise ValueError('ResNet-50 is restricted to the Full Model HiSym-CRGPE backbone ablation')
@@ -702,7 +703,7 @@ class TROGeoMSDetectionAblation(nn.Module):
             raise ValueError('HiSym-PE/DGRPE requires Bi-Res, Swin-T, dadpe=none, and amr=none')
         if position_mode == 'hisym_crgpe':
             crgpe_backbone_ok = backbone == 'swin_t' or (
-                backbone in ('swin_s', 'swin_b', 'resnet50') and variant == 'h2_ind_amhcsfi_res_bi')
+                backbone in ('swin_s', 'swin_b', 'swin_b_native', 'resnet50') and variant == 'h2_ind_amhcsfi_res_bi')
             if (variant not in self.HISYM_CRGPE_SUPPORTED_VARIANTS or not crgpe_backbone_ok
                     or dadpe_mode != 'none' or amr_pe_mode != 'none'):
                 raise ValueError('HiSym-CRGPE requires a supported configuration; '
@@ -712,6 +713,9 @@ class TROGeoMSDetectionAblation(nn.Module):
         self.variant = variant
         self.position_mode = position_mode
         self.backbone_name = backbone
+        self.native_swin_b = backbone == 'swin_b_native'
+        self.stage3_dim = 512 if self.native_swin_b else 384
+        self.stage4_dim = 1024 if self.native_swin_b else 768
         self.dadpe_mode = dadpe_mode
         self.amr_pe_mode = amr_pe_mode
         self.enable_hqs = bool(enable_hqs)
@@ -739,6 +743,10 @@ class TROGeoMSDetectionAblation(nn.Module):
             if self.three_scale or self.need_query_stage2:
                 raise ValueError('Swin-B is implemented only for the two-scale Full Model backbone ablation')
             self.encoder = SwinBMultiStageEncoder()
+        elif backbone == 'swin_b_native':
+            if self.three_scale or self.need_query_stage2:
+                raise ValueError('Swin-B Native is implemented only for the two-scale Full Model')
+            self.encoder = SwinBNativeMultiStageEncoder()
         elif backbone == 'resnet50':
             if self.three_scale or self.need_query_stage2:
                 raise ValueError('ResNet-50 is implemented only for the two-scale Full Model backbone ablation')
@@ -783,9 +791,11 @@ class TROGeoMSDetectionAblation(nn.Module):
                                                     use_self_attention=False, query_chunk_size=512)
         if variant not in (self.AFUSE_B0_VARIANTS + self.DETGEO_TWO_SCALE_VARIANTS +
                            self.CORR_TWO_SCALE_VARIANTS + self.DETGEO_SINGLE_STAGE4_VARIANTS):
-            self.cvopm_stage3 = SpatialTransformer(384, 6, 64, depth=1, context_dim=384,
+            self.cvopm_stage3 = SpatialTransformer(self.stage3_dim, self.stage3_dim // 64, 64,
+                                                    depth=1, context_dim=self.stage3_dim,
                                                     use_self_attention=False)
-            self.cvopm_stage4 = SpatialTransformer(768, 12, 64, depth=1, context_dim=768,
+            self.cvopm_stage4 = SpatialTransformer(self.stage4_dim, self.stage4_dim // 64, 64,
+                                                    depth=1, context_dim=self.stage4_dim,
                                                     use_self_attention=False)
         self._logged_sanity = False
 
@@ -823,10 +833,16 @@ class TROGeoMSDetectionAblation(nn.Module):
             )
             self.det_head_single = nn.Conv2d(768, 45, kernel_size=1)
         else:
-            self.stage4_align = nn.Sequential(
-                nn.ConvTranspose2d(768, 384, kernel_size=4, stride=2, padding=1),
-                nn.ReLU(inplace=True),
-            )
+            if self.native_swin_b:
+                self.stage4_align = nn.Sequential(
+                    nn.ConvTranspose2d(1024, 1024, kernel_size=4, stride=2, padding=1),
+                    nn.ReLU(inplace=True),
+                )
+            else:
+                self.stage4_align = nn.Sequential(
+                    nn.ConvTranspose2d(768, 384, kernel_size=4, stride=2, padding=1),
+                    nn.ReLU(inplace=True),
+                )
             if variant == 'h2_shared':
                 self.det_head_shared = nn.Conv2d(384, 45, kernel_size=1)
             elif variant in self.FG_AMHCSFI_RES_SINGLE_VARIANTS + self.AMHCSFI_RES_BI_SINGLE_VARIANTS + self.AFUSE_NEW_VARIANTS:
@@ -835,8 +851,9 @@ class TROGeoMSDetectionAblation(nn.Module):
                     _rng_pad_stage4_head = nn.Conv2d(384, 45, kernel_size=1)
                     del _rng_pad_stage4_head
             else:  # H2/H3 variants deliberately share the independent-head state layout.
-                self.det_head_stage3 = nn.Conv2d(384, 45, kernel_size=1)
-                self.det_head_stage4 = nn.Conv2d(384, 45, kernel_size=1)
+                self.det_head_stage3 = nn.Conv2d(self.stage3_dim, 45, kernel_size=1)
+                self.det_head_stage4 = nn.Conv2d(
+                    self.stage4_dim if self.native_swin_b else 384, 45, kernel_size=1)
                 if self.three_scale:
                     self.stage2_align = nn.Sequential(
                         nn.Conv2d(192, 384, kernel_size=3, stride=2, padding=1),
@@ -900,19 +917,22 @@ class TROGeoMSDetectionAblation(nn.Module):
         if self.variant in self.CSFI_VARIANTS or self.variant in self.ADAPTIVE_CSFI_VARIANTS:
             # AMHCSFI-Res reuses this original module.  Construct it at the
             # exact ordinary-CSFI RNG position, before the matching guidance.
-            self.cross_scale_interaction = CrossScaleFeatureInteraction()
+            self.cross_scale_interaction = CrossScaleFeatureInteraction(
+                c3=self.stage3_dim, c4=self.stage4_dim)
         if self.variant in self.MHCSFI_VARIANTS:
             self.mh_cross_scale_interaction = MultiHeadCrossScaleFeatureInteraction(
-                adaptive=self.variant == 'h2_ind_amhcsfi_bi')
+                adaptive=self.variant == 'h2_ind_amhcsfi_bi',
+                c3=self.stage3_dim, c4=self.stage4_dim)
         # NoCSFI variants are standalone natural-RNG models: they neither
         # construct CSFI nor synthesize its RNG consumption.
         if self.variant in self.COARSE_GUIDE_VARIANTS:
-            self.coarse_guidance = CoarseGuidance()
+            self.coarse_guidance = CoarseGuidance(channels=self.stage4_dim)
         if self.variant in self.FINE_GUIDE_VARIANTS:
-            self.fine_guidance = FineGuidance()
+            self.fine_guidance = FineGuidance(channels=self.stage3_dim)
         # Must be after every corresponding ordinary-CSFI public module.
         if self.variant in self.AMHCSFI_RES_VARIANTS:
-            self.amhcsfi_res_refiner = ResidualAdaptiveMultiReceptiveCSFI()
+            self.amhcsfi_res_refiner = ResidualAdaptiveMultiReceptiveCSFI(
+                c3=self.stage3_dim, c4=self.stage4_dim)
         if self.variant in self.QCC_VARIANTS:
             # Every QCC variant has the identical parameter layout.  QCC-A
             # simply does not consume the ranker at train/inference time.
@@ -1149,10 +1169,10 @@ class TROGeoMSDetectionAblation(nn.Module):
         else:
             q3, q4 = self.encoder(query_input)
             r3, r4 = self.encoder(reference_imgs)
-        self._expect('query stage3', q3, 384, query_input.shape[-2] // 16, query_input.shape[-1] // 16)
-        self._expect('query stage4', q4, 768, query_input.shape[-2] // 32, query_input.shape[-1] // 32)
-        self._expect('satellite stage3', r3, 384, reference_imgs.shape[-2] // 16, reference_imgs.shape[-1] // 16)
-        self._expect('satellite stage4', r4, 768, reference_imgs.shape[-2] // 32, reference_imgs.shape[-1] // 32)
+        self._expect('query stage3', q3, self.stage3_dim, query_input.shape[-2] // 16, query_input.shape[-1] // 16)
+        self._expect('query stage4', q4, self.stage4_dim, query_input.shape[-2] // 32, query_input.shape[-1] // 32)
+        self._expect('satellite stage3', r3, self.stage3_dim, reference_imgs.shape[-2] // 16, reference_imgs.shape[-1] // 16)
+        self._expect('satellite stage4', r4, self.stage4_dim, reference_imgs.shape[-2] // 32, reference_imgs.shape[-1] // 32)
         if self.dadpe_mode == 'multiscale':
             q3, q4, dadpe_p3, dadpe_p4 = self.multiscale_direction_residual(q3, q4, geometry)
         if self.variant in self.DETGEO_SINGLE_STAGE4_VARIANTS:
@@ -1418,8 +1438,16 @@ class TROGeoMSDetectionAblation(nn.Module):
                           'stage3_adapter=512->384 stage4_adapter=1024->768 '
                           'variant=h2_ind_amhcsfi_res_bi position={} bi_guidance=True '
                           'amhcsfi_res=True dual_head=True q3={} q4={} r3={} r4={}'.format(
-                              self.position_mode, tuple(q3.shape), tuple(q4.shape),
-                              tuple(r3.shape), tuple(r4.shape)), flush=True)
+                          self.position_mode, tuple(q3.shape), tuple(q4.shape),
+                          tuple(r3.shape), tuple(r4.shape)), flush=True)
+                if self.native_swin_b and self.variant == 'h2_ind_amhcsfi_res_bi':
+                    print('[FullModel-SwinB-Native sanity] backbone=swin_b_native shared_encoder=True '
+                          'backbone_adapter=False stage3_dim=512 stage4_dim=1024 ca3_heads=8 '
+                          'ca4_heads=16 d_head=64 bi_guidance=True amhcsfi_res=True dual_head=True '
+                          'q3={} q4={} r3={} r4={} z3={} z4={} aligned4={} p3={} p4={}'.format(
+                              tuple(q3.shape), tuple(q4.shape), tuple(r3.shape), tuple(r4.shape),
+                              tuple(z3.shape), tuple(z4.shape), tuple(aligned4.shape),
+                              tuple(predictions['stage3'].shape), tuple(predictions['stage4'].shape)), flush=True)
                 if self.backbone_name == 'resnet50' and self.variant == 'h2_ind_amhcsfi_res_bi':
                     print('[FullModel-ResNet50 sanity] backbone=resnet50 shared_encoder=True '
                           'stage3_adapter=1024->384 stage4_adapter=2048->768 '

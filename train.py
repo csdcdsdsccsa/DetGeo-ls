@@ -239,7 +239,7 @@ def main():
     parser.add_argument('--acr_reg_weight', default=0.5, type=float)
     parser.add_argument('--acr_alpha_weight', default=0.01, type=float)
     parser.add_argument('--acr_weight_decay', default=1e-4, type=float)
-    parser.add_argument('--trogeo_backbone', choices=('swin_s', 'swin_t', 'swin_b', 'resnet50', 'vit_t', 'vit_s'), default='swin_s',
+    parser.add_argument('--trogeo_backbone', choices=('swin_s', 'swin_t', 'swin_b', 'swin_b_native', 'resnet50', 'vit_t', 'vit_s'), default='swin_s',
                         help='shared ImageNet backbone for TROGeo modes')
     parser.add_argument('--trogeo_aug_mode', choices=('current', 'detgeo'), default='current',
                         help='TROGeo train augmentation: current or original DetGeo RSDataset recipe')
@@ -359,11 +359,11 @@ def main():
     trogeo_mode = any(trogeo_experiments)
     if args.trogeo_ms_direct_ca_sh and args.trogeo_backbone != 'swin_t':
         parser.error('--trogeo_ms_direct_ca_sh currently requires --trogeo_backbone swin_t')
-    if args.trogeo_ms_det_variant != 'none' and args.trogeo_backbone not in ('swin_t', 'swin_s', 'swin_b', 'resnet50', 'vit_t', 'vit_s'):
-        parser.error('--trogeo_ms_det_variant requires --trogeo_backbone swin_t/swin_s/swin_b/resnet50/vit_t/vit_s')
+    if args.trogeo_ms_det_variant != 'none' and args.trogeo_backbone not in ('swin_t', 'swin_s', 'swin_b', 'swin_b_native', 'resnet50', 'vit_t', 'vit_s'):
+        parser.error('--trogeo_ms_det_variant requires a supported TROGeo backbone')
     if args.trogeo_backbone in ('vit_t', 'vit_s') and args.trogeo_ms_det_variant != 'h2_ind':
         parser.error('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
-    if args.trogeo_backbone in ('swin_s', 'swin_b'):
+    if args.trogeo_backbone in ('swin_s', 'swin_b', 'swin_b_native'):
         if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
             parser.error('Swin-S/Swin-B MS experiment is restricted to Full Model h2_ind_amhcsfi_res_bi')
         if args.trogeo_position_mode != 'hisym_crgpe' or args.trogeo_click_map_mode != 'gaussian':
@@ -426,7 +426,7 @@ def main():
             'h2_ind_amhcsfi_res_bi_qcc_af',
         )
         crgpe_backbone_ok = args.trogeo_backbone == 'swin_t' or (
-            args.trogeo_backbone in ('swin_s', 'swin_b', 'resnet50') and args.trogeo_ms_det_variant == 'h2_ind_amhcsfi_res_bi')
+            args.trogeo_backbone in ('swin_s', 'swin_b', 'swin_b_native', 'resnet50') and args.trogeo_ms_det_variant == 'h2_ind_amhcsfi_res_bi')
         if args.trogeo_ms_det_variant not in hisym_crgpe_supported_variants or \
                 not crgpe_backbone_ok or args.trogeo_click_map_mode != 'gaussian' or \
                 args.gaussian_sigma <= 0 or args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
