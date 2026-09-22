@@ -79,6 +79,10 @@ def create_dataset(data_root, dataset, n_splits, fold_seed, force):
         component_indices[dsu.find('Q::' + record[1])].append(index)
 
     components = list(component_indices.values())
+    if len(components) < n_splits:
+        raise RuntimeError(
+            '{} has only {} connected components; cannot create {} image-disjoint folds'.format(
+                dataset, len(components), n_splits))
     random.Random(fold_seed).shuffle(components)
     components.sort(key=len, reverse=True)
     fold_indices = [[] for _ in range(n_splits)]
@@ -113,6 +117,8 @@ def create_dataset(data_root, dataset, n_splits, fold_seed, force):
         assert not set(train_indices).intersection(val_indices)
         assert len(train_indices) + len(val_indices) == len(dev)
         fold = fold_zero + 1
+        if not val_indices:
+            raise RuntimeError('{} fold {} is empty after connected-component assignment'.format(dataset, fold))
         torch.save(train_records, os.path.join(out_dir, 'fold{}_train.pth'.format(fold)))
         torch.save(val_records, os.path.join(out_dir, 'fold{}_val.pth'.format(fold)))
         folds.append({
@@ -136,6 +142,8 @@ def create_dataset(data_root, dataset, n_splits, fold_seed, force):
     duplicate_count = sum(count - 1 for count in Counter(digest(record) for record in dev).values() if count > 1)
     dev_query, dev_satellite = identities(dev)
     test_query, test_satellite = identities(official_test)
+    dev_digests = {digest(record) for record in dev}
+    test_digests = {digest(record) for record in official_test}
     manifest = {
         'dataset': dataset, 'fold_seed': fold_seed, 'n_splits': n_splits,
         'train_count_original': len(original_train), 'val_count_original': len(original_val),
@@ -143,6 +151,7 @@ def create_dataset(data_root, dataset, n_splits, fold_seed, force):
         'unique_query_count': len(dev_query), 'unique_satellite_count': len(dev_satellite),
         'component_count': len(components), 'largest_component_size': max(map(len, components)),
         'duplicate_record_count': duplicate_count,
+        'development_test_exact_record_overlap_count': len(dev_digests.intersection(test_digests)),
         'development_test_query_overlap_count': len(dev_query.intersection(test_query)),
         'development_test_satellite_overlap_count': len(dev_satellite.intersection(test_satellite)),
         'folds': folds,
@@ -153,8 +162,9 @@ def create_dataset(data_root, dataset, n_splits, fold_seed, force):
         writer = csv.DictWriter(handle, fieldnames=list(assignments[0]))
         writer.writeheader()
         writer.writerows(assignments)
-    print('{}: dev={} components={} folds={} sizes={} duplicates={} dev/test(Q,S)=({},{})'.format(
-        dataset, len(dev), len(components), n_splits, fold_sizes, duplicate_count,
+    print('{}: dev={} components={} largest_component={} folds={} sizes={} duplicates={} dev/test(records,Q,S)=({},{},{})'.format(
+        dataset, len(dev), len(components), manifest['largest_component_size'], n_splits, fold_sizes, duplicate_count,
+        manifest['development_test_exact_record_overlap_count'],
         manifest['development_test_query_overlap_count'], manifest['development_test_satellite_overlap_count']))
 
 

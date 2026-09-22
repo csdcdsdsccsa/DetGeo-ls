@@ -63,8 +63,11 @@ def check_dataset(data_root, dataset):
     assert sorted(all_val) == list(range(len(dev)))
     dev_query, dev_satellite = identities(dev)
     test_query, test_satellite = identities(official_test)
-    print('{} PASS: val coverage={} component_leakage=0 official_test_records=0 dev/test(Q,S)=({},{})'.format(
-        dataset, len(all_val), len(dev_query.intersection(test_query)), len(dev_satellite.intersection(test_satellite))))
+    dev_digests = {digest(record) for record in dev}
+    test_digests = {digest(record) for record in official_test}
+    print('{} PASS: val coverage={} component_leakage=0 dev/test(records,Q,S)=({},{},{})'.format(
+        dataset, len(all_val), len(dev_digests.intersection(test_digests)),
+        len(dev_query.intersection(test_query)), len(dev_satellite.intersection(test_satellite))))
 
 
 def main():

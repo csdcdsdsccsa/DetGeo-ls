@@ -11,18 +11,20 @@ from dataset.trogeo_loader import TROGeoRSDataset
 from model.TROGeo_ms_detection_ablation import TROGeoMSDetectionAblation
 
 
-def run(dataset, gaussian_sigma_x=None, outer_sigma_x=None):
+def run(dataset, gpu, gaussian_sigma_x=None, outer_sigma_x=None):
     split = 'data/{}/cv5_grouped/fold1_train.pth'.format(dataset)
     data = TROGeoRSDataset('data', dataset, split_name='train', split_pth=split,
                            img_size=1024, transform=Compose([ToTensor()]), augment=False,
                            aug_mode='current', click_map_mode='gaussian', gaussian_sigma=25.0,
                            gaussian_sigma_x=gaussian_sigma_x)
     query, satellite, click_map, _, _ = next(iter(DataLoader(data, batch_size=1, shuffle=False, num_workers=0)))
+    device = torch.device('cuda:{}'.format(gpu))
+    torch.cuda.set_device(device)
     model = TROGeoMSDetectionAblation(
         emb_size=768, backbone='swin_t', variant='h2_ind_amhcsfi_res_bi',
         position_mode='hisym_crgpe', gaussian_sigma=25.0, gaussian_sigma_x=gaussian_sigma_x,
-        crgpe_outer_sigma=50.0, crgpe_outer_sigma_x=outer_sigma_x).cuda().train()
-    outputs, _ = model(query.cuda(), satellite.cuda(), click_map.cuda())
+        crgpe_outer_sigma=50.0, crgpe_outer_sigma_x=outer_sigma_x).to(device).train()
+    outputs, _ = model(query.to(device), satellite.to(device), click_map.to(device))
     loss = outputs['stage3'].mean() + outputs['stage4'].mean()
     loss.backward()
     print('{} loader+forward+backward PASS: q={} r={} click={} p3={} p4={}'.format(
@@ -33,8 +35,9 @@ def run(dataset, gaussian_sigma_x=None, outer_sigma_x=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', choices=('CVOGL_DroneAerial', 'CVOGL_SVI'), required=True)
+    parser.add_argument('--gpu', type=int, default=0)
     args = parser.parse_args()
     if args.dataset == 'CVOGL_SVI':
-        run(args.dataset, gaussian_sigma_x=50.0, outer_sigma_x=100.0)
+        run(args.dataset, args.gpu, gaussian_sigma_x=50.0, outer_sigma_x=100.0)
     else:
-        run(args.dataset)
+        run(args.dataset, args.gpu)
