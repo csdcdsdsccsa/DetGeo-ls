@@ -126,7 +126,7 @@ def visualize_bbox(img, bbox, class_name, color=BOX_COLOR, thickness=2):
     return img
 
 class RSDataset(Dataset):
-    def __init__(self, data_root, data_name='CVOGL', split_name='train', img_size=1024,
+    def __init__(self, data_root, data_name='CVOGL', split_name='train', split_pth=None, img_size=1024,
                  transform=None, augment=False):
         self.data_root = data_root
         self.data_name = data_name
@@ -139,16 +139,22 @@ class RSDataset(Dataset):
 
         if self.data_name == 'CVOGL_DroneAerial':
             data_dir = os.path.join(data_root, self.data_name)
-            data_path = os.path.join(data_dir, '{0}_{1}.pth'.format(self.data_name, split_name))
-            self.data_list = torch.load(data_path)
+            default_path = os.path.join(data_dir, '{0}_{1}.pth'.format(self.data_name, split_name))
+            data_path = split_pth or default_path
+            if not os.path.isfile(data_path):
+                raise FileNotFoundError('CVOGL split does not exist: {}'.format(data_path))
+            self.data_list = torch.load(data_path, map_location='cpu')
             self.queryimg_dir = os.path.join(data_dir, 'query')
             self.rsimg_dir = os.path.join(data_dir, 'satellite')
             self.rs_wh = 1024
             self.query_featuremap_hw = (256, 256) #52 #32
         elif self.data_name == 'CVOGL_SVI':
             data_dir = os.path.join(data_root, self.data_name)
-            data_path = os.path.join(data_dir, '{0}_{1}.pth'.format(self.data_name, split_name))
-            self.data_list = torch.load(data_path)
+            default_path = os.path.join(data_dir, '{0}_{1}.pth'.format(self.data_name, split_name))
+            data_path = split_pth or default_path
+            if not os.path.isfile(data_path):
+                raise FileNotFoundError('CVOGL split does not exist: {}'.format(data_path))
+            self.data_list = torch.load(data_path, map_location='cpu')
             self.queryimg_dir = os.path.join(data_dir, 'query')
             self.rsimg_dir = os.path.join(data_dir, 'satellite')
             self.rs_wh = 1024

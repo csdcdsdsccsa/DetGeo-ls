@@ -681,7 +681,7 @@ def main():
         train_split_kwargs = {}
         val_split_kwargs = {}
         test_split_kwargs = {}
-        if dataset_class is TROGeoRSDataset:
+        if dataset_class in (TROGeoRSDataset, RSDataset):
             train_split_kwargs['split_pth'] = args.train_pth or None
             val_split_kwargs['split_pth'] = args.val_pth or None
             test_split_kwargs['split_pth'] = args.test_pth or None
