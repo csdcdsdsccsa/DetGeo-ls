@@ -12,12 +12,17 @@ import statistics
 METRICS = ('acc50', 'acc25', 'miou', 'center_acc')
 DATASETS = (('CVOGL_DroneAerial', 'drone'), ('CVOGL_SVI', 'svi'))
 SPLITS = ('cvval', 'cvtest')
+TENSOR_RE = re.compile(r'tensor\(\s*([-+]?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?)')
 METRIC_RE = re.compile(r'(?:INFO\s+)?([0-9.]+),\s*([0-9.]+),\s*([0-9.]+),\s*([0-9.]+)')
 
 
 def read_metrics(path):
     with open(path, encoding='utf-8', errors='replace') as handle:
-        matches = [tuple(map(float, values)) for values in METRIC_RE.findall(handle.read())]
+        text = handle.read()
+    tensor_values = [float(value) for value in TENSOR_RE.findall(text)]
+    if len(tensor_values) >= 4:
+        return tuple(tensor_values[-4:])
+    matches = [tuple(map(float, values)) for values in METRIC_RE.findall(text)]
     if not matches:
         raise ValueError('{} does not contain final DetGeo metrics'.format(path))
     return matches[-1]

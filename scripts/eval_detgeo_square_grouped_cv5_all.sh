@@ -40,4 +40,8 @@ preflight_all_checkpoints
 evaluate_dataset CVOGL_DroneAerial drone
 evaluate_dataset CVOGL_SVI svi
 PYTHONPATH=. "$PYTHON_BIN" tools/summarize_detgeo_square_grouped_cv5.py --log_dir "$EVAL_LOG_DIR" --output_dir results
-PYTHONPATH=. "$PYTHON_BIN" tools/compare_fullmodel_detgeo_grouped_cv5.py
+if [[ -f results/grouped_cv5_summary.json ]]; then
+  PYTHONPATH=. "$PYTHON_BIN" tools/compare_fullmodel_detgeo_grouped_cv5.py
+else
+  echo 'Full Model grouped_cv5_summary.json not found; skip paired comparison.'
+fi
