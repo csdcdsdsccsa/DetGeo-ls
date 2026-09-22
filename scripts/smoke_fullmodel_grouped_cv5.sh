@@ -5,7 +5,9 @@ cd "$(dirname "$0")/.."
 PYTHON_BIN="${PYTHON_BIN:-/root/miniconda3/envs/detgeo/bin/python}"
 GPU="${GPU:-0}"
 
-PYTHONPATH=. "$PYTHON_BIN" tools/make_cvogl_grouped_cv5.py --data_root data
+if [[ ! -f data/CVOGL_DroneAerial/cv5_grouped/manifest.json || ! -f data/CVOGL_SVI/cv5_grouped/manifest.json ]]; then
+  PYTHONPATH=. "$PYTHON_BIN" tools/make_cvogl_grouped_cv5.py --data_root data
+fi
 PYTHONPATH=. "$PYTHON_BIN" tools/check_cvogl_grouped_cv5.py --data_root data
 CUDA_VISIBLE_DEVICES="$GPU" PYTHONPATH=. "$PYTHON_BIN" tools/smoke_cvogl_grouped_cv5.py --dataset CVOGL_DroneAerial
 CUDA_VISIBLE_DEVICES="$GPU" PYTHONPATH=. "$PYTHON_BIN" tools/smoke_cvogl_grouped_cv5.py --dataset CVOGL_SVI
