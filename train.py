@@ -105,9 +105,9 @@ def main():
     parser.add_argument('--data_root', type=str, default='./data', help='path to the root folder of all dataset')
     parser.add_argument('--data_name', default='CVOGL_DroneAerial', type=str,
                         help='CVOGL_DroneAerial/CVOGL_SVI/VIGOR_Building')
-    parser.add_argument('--train_pth', default='', type=str, help='fixed VIGOR-Building train split')
-    parser.add_argument('--val_pth', default='', type=str, help='fixed VIGOR-Building validation split')
-    parser.add_argument('--test_pth', default='', type=str, help='fixed VIGOR-Building test split')
+    parser.add_argument('--train_pth', default='', type=str, help='optional fixed training split .pth for CVOGL/VIGOR')
+    parser.add_argument('--val_pth', default='', type=str, help='optional fixed validation split .pth for CVOGL/VIGOR')
+    parser.add_argument('--test_pth', default='', type=str, help='optional fixed test split .pth for CVOGL/VIGOR')
     parser.add_argument('--pretrain', default='', type=str, metavar='PATH')
     parser.add_argument('--resume', default='', type=str, metavar='PATH',
                         help='resume model, optimizer and epoch from a training checkpoint')
@@ -455,6 +455,12 @@ def main():
         for label, split_path in (('train', args.train_pth), ('val', args.val_pth), ('test', args.test_pth)):
             if not split_path or not os.path.isfile(split_path):
                 parser.error('VIGOR_Building requires existing --{}_pth, got {!r}'.format(label, split_path))
+    if args.data_name in ('CVOGL_DroneAerial', 'CVOGL_SVI'):
+        if bool(args.train_pth) != bool(args.val_pth):
+            parser.error('CVOGL custom cross-validation requires --train_pth and --val_pth together')
+        for label, split_path in (('train', args.train_pth), ('val', args.val_pth), ('test', args.test_pth)):
+            if split_path and not os.path.isfile(split_path):
+                parser.error('{} split does not exist: {}'.format(label, split_path))
     if args.bbox_threshold_reg:
         if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
             parser.error('--bbox_threshold_reg is restricted to Bi-Res h2_ind_amhcsfi_res_bi')
@@ -672,25 +678,35 @@ def main():
         val_dataset = VigorBuildingDataset(split_pth=args.val_pth, augment=False, **vigor_kwargs)
         test_dataset = VigorBuildingDataset(split_pth=args.test_pth, augment=False, **vigor_kwargs)
     else:
+        train_split_kwargs = {}
+        val_split_kwargs = {}
+        test_split_kwargs = {}
+        if dataset_class is TROGeoRSDataset:
+            train_split_kwargs['split_pth'] = args.train_pth or None
+            val_split_kwargs['split_pth'] = args.val_pth or None
+            test_split_kwargs['split_pth'] = args.test_pth or None
         train_dataset = dataset_class(data_root=args.data_root,
                          data_name=args.data_name,
                          split_name='train',
                          img_size=args.img_size,
                          transform=input_transform,
                          augment=True,
-                         **({'aug_mode': args.trogeo_aug_mode} if trogeo_mode else {}), **prompt_kwargs)
+                         **({'aug_mode': args.trogeo_aug_mode} if trogeo_mode else {}), **prompt_kwargs,
+                         **train_split_kwargs)
         val_dataset = dataset_class(data_root=args.data_root,
                          data_name=args.data_name,
                          split_name='val',
                          img_size = args.img_size,
                          transform=input_transform,
-                         **({'aug_mode': args.trogeo_aug_mode} if trogeo_mode else {}), **prompt_kwargs)
+                         **({'aug_mode': args.trogeo_aug_mode} if trogeo_mode else {}), **prompt_kwargs,
+                         **val_split_kwargs)
         test_dataset = dataset_class(data_root=args.data_root,
                          data_name=args.data_name,
                          split_name='test',
                          img_size = args.img_size,
                          transform=input_transform,
-                         **({'aug_mode': args.trogeo_aug_mode} if trogeo_mode else {}), **prompt_kwargs)
+                         **({'aug_mode': args.trogeo_aug_mode} if trogeo_mode else {}), **prompt_kwargs,
+                         **test_split_kwargs)
     loader_kwargs = dict(batch_size=args.batch_size, pin_memory=True,
                          drop_last=False, num_workers=args.num_workers)
     train_loader_kwargs = dict(loader_kwargs, drop_last=(args.data_name == 'VIGOR_Building'))

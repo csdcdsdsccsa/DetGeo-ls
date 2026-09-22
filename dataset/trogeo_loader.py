@@ -13,13 +13,16 @@ cv2.setNumThreads(0)
 
 
 class TROGeoRSDataset(Dataset):
-    def __init__(self, data_root, data_name='CVOGL_DroneAerial', split_name='train', img_size=1024,
+    def __init__(self, data_root, data_name='CVOGL_DroneAerial', split_name='train', split_pth=None, img_size=1024,
                  transform=None, augment=False, aug_mode='current', click_map_mode='distance', gaussian_sigma=25.0,
                  gaussian_sigma_x=None):
         if data_name not in ('CVOGL_DroneAerial', 'CVOGL_SVI'):
             raise ValueError('unsupported data_name: {}'.format(data_name))
         data_dir = os.path.join(data_root, data_name)
-        self.data_list = torch.load(os.path.join(data_dir, '{}_{}.pth'.format(data_name, split_name)))
+        data_path = split_pth or os.path.join(data_dir, '{}_{}.pth'.format(data_name, split_name))
+        if not os.path.isfile(data_path):
+            raise FileNotFoundError('CVOGL split does not exist: {}'.format(data_path))
+        self.data_list = torch.load(data_path, map_location='cpu')
         self.queryimg_dir = os.path.join(data_dir, 'query')
         self.rsimg_dir = os.path.join(data_dir, 'satellite')
         self.img_size = img_size
