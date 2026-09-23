@@ -7,6 +7,7 @@ loaded: this is an architecture-only measurement.
 """
 
 import argparse
+import csv
 import math
 import os
 
