@@ -4,9 +4,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-OUTPUT_CSV="${OUTPUT_CSV:-results/backbone_params_flops.csv}"
-OUTPUT_MD="${OUTPUT_MD:-results/backbone_params_flops.md}"
-OUTPUT_LOG="${OUTPUT_LOG:-logs/backbone_params_flops.log}"
+OUTPUT_CSV="${OUTPUT_CSV:-results/backbone_params_flops_no_weights.csv}"
+OUTPUT_MD="${OUTPUT_MD:-results/backbone_params_flops_no_weights.md}"
+OUTPUT_LOG="${OUTPUT_LOG:-logs/backbone_params_flops_no_weights.log}"
 
 "$PYTHON_BIN" -c 'import fvcore' >/dev/null 2>&1 || {
   echo "fvcore is not installed in $PYTHON_BIN" >&2
