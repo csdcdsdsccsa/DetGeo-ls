@@ -5,6 +5,8 @@ cd "$(dirname "$0")/.."
 
 PYTHON_BIN="${PYTHON_BIN:-/root/miniconda3/envs/detgeo/bin/python}"
 GPU="${GPU:-0}"
+OUTPUT_CSV="${OUTPUT_CSV:-results/efficiency_fullmodel_vs_detgeo.csv}"
+OUTPUT_MD="${OUTPUT_MD:-results/efficiency_fullmodel_vs_detgeo.md}"
 CHECKPOINTS=(
   "saved_models/scratch25_worker24_square_seed13_model_best.pth.tar"
   "saved_models/scratch25_worker24_square_svi_naturalrng_seed13_model_best.pth.tar"
@@ -24,6 +26,6 @@ done
 mkdir -p results logs
 CUDA_VISIBLE_DEVICES="$GPU" PYTHONPATH=. "$PYTHON_BIN" tools/profile_efficiency.py \
   --device cuda:0 --warmup "${WARMUP:-100}" --iterations "${ITERATIONS:-500}" --repeats "${REPEATS:-5}" \
-  --output_csv results/efficiency_fullmodel_vs_detgeo.csv \
-  --output_md results/efficiency_fullmodel_vs_detgeo.md \
+  --output_csv "$OUTPUT_CSV" \
+  --output_md "$OUTPUT_MD" \
   2>&1 | tee logs/efficiency_fullmodel_vs_detgeo.log
