@@ -672,7 +672,8 @@ class TROGeoMSDetectionAblation(nn.Module):
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current', dadpe_mode='none',
                  amr_pe_mode='none', gaussian_sigma=25.0, gaussian_sigma_x=None,
                  crgpe_outer_sigma=50.0, crgpe_outer_sigma_x=None,
-                 enable_hqs=False, enable_hqs_v2a=False, enable_hqs_v2b=False, enable_acr=False):
+                 enable_hqs=False, enable_hqs_v2a=False, enable_hqs_v2b=False, enable_acr=False,
+                 unshared_backbone=False):
         super().__init__()
         if (emb_size != 768 or backbone not in ('swin_t', 'swin_s', 'swin_b', 'swin_b_native', 'resnet50', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
                 or position_mode not in ('current', 'detgeo', 'dg', 'ddg', 'rdg', 'hisym_pe', 'dgrpe',
@@ -713,6 +714,11 @@ class TROGeoMSDetectionAblation(nn.Module):
         self.variant = variant
         self.position_mode = position_mode
         self.backbone_name = backbone
+        self.unshared_backbone = bool(unshared_backbone)
+        if self.unshared_backbone and (backbone != 'swin_t' or variant != 'h2_ind_amhcsfi_res_bi'
+                                       or position_mode != 'hisym_crgpe' or dadpe_mode != 'none'
+                                       or amr_pe_mode != 'none'):
+            raise ValueError('unshared backbone requires Full Model Bi-Res + HiSym-CRGPE with Swin-T and dadpe/amr=none')
         self.native_swin_b = backbone == 'swin_b_native'
         self.stage3_dim = 512 if self.native_swin_b else 384
         self.stage4_dim = 1024 if self.native_swin_b else 768
@@ -752,8 +758,12 @@ class TROGeoMSDetectionAblation(nn.Module):
                 raise ValueError('ResNet-50 is implemented only for the two-scale Full Model backbone ablation')
             self.encoder = ResNet50MultiStageEncoder()
         elif backbone == 'swin_t':
-            self.encoder = (SwinTThreeStageEncoder() if (self.three_scale or self.need_query_stage2)
-                            else SwinTMultiStageEncoder())
+            encoder_cls = SwinTThreeStageEncoder if (self.three_scale or self.need_query_stage2) else SwinTMultiStageEncoder
+            if self.unshared_backbone:
+                self.query_encoder = encoder_cls()
+                self.reference_encoder = encoder_cls()
+            else:
+                self.encoder = encoder_cls()
         else:
             raise ValueError('unsupported TROGeo MS backbone: {}'.format(backbone))
         if position_mode == 'current':
@@ -1167,8 +1177,12 @@ class TROGeoMSDetectionAblation(nn.Module):
             _, r3, r4 = self.encoder(reference_imgs)
             self._expect('LE query stage2', q2, 192, 32, 32)
         else:
-            q3, q4 = self.encoder(query_input)
-            r3, r4 = self.encoder(reference_imgs)
+            if self.unshared_backbone:
+                q3, q4 = self.query_encoder(query_input)
+                r3, r4 = self.reference_encoder(reference_imgs)
+            else:
+                q3, q4 = self.encoder(query_input)
+                r3, r4 = self.encoder(reference_imgs)
         self._expect('query stage3', q3, self.stage3_dim, query_input.shape[-2] // 16, query_input.shape[-1] // 16)
         self._expect('query stage4', q4, self.stage4_dim, query_input.shape[-2] // 32, query_input.shape[-1] // 32)
         self._expect('satellite stage3', r3, self.stage3_dim, reference_imgs.shape[-2] // 16, reference_imgs.shape[-1] // 16)
@@ -1420,13 +1434,18 @@ class TROGeoMSDetectionAblation(nn.Module):
                           tuple(r3.shape), tuple(r4.shape), tuple(z2.shape), tuple(z3.shape), tuple(z4.shape),
                           shapes, self._position_mode()), flush=True)
             else:
-                print('[TROGeo MS detection sanity] variant={} backbone={} shared_encoder=True self_attention_stage3=False '
+                print('[TROGeo MS detection sanity] variant={} backbone={} shared_encoder={} self_attention_stage3=False '
                       'self_attention_stage4=False q3={} q4={} r3={} r4={} z3={} z4={} predictions={} '
                       'feature_fusion={} position_injection={} position_encoder={}'.format(
-                      self.variant, self.backbone_name, tuple(q3.shape), tuple(q4.shape),
+                      self.variant, self.backbone_name, not self.unshared_backbone, tuple(q3.shape), tuple(q4.shape),
                       tuple(r3.shape), tuple(r4.shape), tuple(z3.shape), tuple(z4.shape), shapes,
                        self.variant in self.CSFI_VARIANTS or self.variant in self.ADAPTIVE_CSFI_VARIANTS or self.variant in self.MHCSFI_VARIANTS,
                        self._position_mode(), self.position_mode), flush=True)
+                if self.unshared_backbone:
+                    print('[FullModel-Unshared-SwinT sanity] backbone=swin_t shared_encoder=False '
+                          'query_encoder=independent reference_encoder=independent '
+                          'variant=h2_ind_amhcsfi_res_bi position=hisym_crgpe '
+                          'bi_guidance=True amhcsfi_res=True dual_head=True', flush=True)
                 if self.backbone_name == 'swin_s' and self.variant == 'h2_ind_amhcsfi_res_bi':
                     print('[FullModel-SwinS sanity] backbone=swin_s variant=h2_ind_amhcsfi_res_bi '
                           'position={} bi_guidance=True amhcsfi_res=True dual_head=True '

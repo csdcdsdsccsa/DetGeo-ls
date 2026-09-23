@@ -241,6 +241,8 @@ def main():
     parser.add_argument('--acr_weight_decay', default=1e-4, type=float)
     parser.add_argument('--trogeo_backbone', choices=('swin_s', 'swin_t', 'swin_b', 'swin_b_native', 'resnet50', 'vit_t', 'vit_s'), default='swin_s',
                         help='shared ImageNet backbone for TROGeo modes')
+    parser.add_argument('--trogeo_unshared_backbone', action='store_true',
+                        help='use independent Query/Satellite backbones; restricted to Full Model Swin-T + HiSym-CRGPE')
     parser.add_argument('--trogeo_aug_mode', choices=('current', 'detgeo'), default='current',
                         help='TROGeo train augmentation: current or original DetGeo RSDataset recipe')
     parser.add_argument('--trogeo_position_mode', choices=('current', 'detgeo', 'dg', 'ddg', 'rdg', 'hisym_pe', 'dgrpe',
@@ -357,6 +359,17 @@ def main():
     if sum(trogeo_experiments) > 1:
         parser.error('TROGeo experiment modes are mutually exclusive')
     trogeo_mode = any(trogeo_experiments)
+    if args.trogeo_unshared_backbone:
+        if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
+            parser.error('--trogeo_unshared_backbone requires Full Model h2_ind_amhcsfi_res_bi')
+        if args.trogeo_backbone != 'swin_t':
+            parser.error('--trogeo_unshared_backbone requires --trogeo_backbone swin_t')
+        if args.trogeo_position_mode != 'hisym_crgpe':
+            parser.error('--trogeo_unshared_backbone requires Full Model HiSym-CRGPE')
+        if args.trogeo_click_map_mode != 'gaussian':
+            parser.error('--trogeo_unshared_backbone requires --trogeo_click_map_mode gaussian')
+        if args.dadpe_mode != 'none' or args.amr_pe_mode != 'none':
+            parser.error('--trogeo_unshared_backbone requires dadpe=none and amr=none')
     if args.trogeo_ms_direct_ca_sh and args.trogeo_backbone != 'swin_t':
         parser.error('--trogeo_ms_direct_ca_sh currently requires --trogeo_backbone swin_t')
     if args.trogeo_ms_det_variant != 'none' and args.trogeo_backbone not in ('swin_t', 'swin_s', 'swin_b', 'swin_b_native', 'resnet50', 'vit_t', 'vit_s'):
@@ -752,7 +765,8 @@ def main():
                                            crgpe_outer_sigma_x=args.crgpe_outer_sigma_x,
                                            enable_hqs=args.hqs_v1,
                                            enable_hqs_v2a=args.hqs_v2a, enable_hqs_v2b=args.hqs_v2b,
-                                           enable_acr=args.acr_head)
+                                           enable_acr=args.acr_head,
+                                           unshared_backbone=args.trogeo_unshared_backbone)
     elif args.backbone_exp != 'baseline':
         model = DetGeoBackboneAblation(emb_size=args.emb_size, leaky=True, backbone_exp=args.backbone_exp)
     elif args.single_scale_ca:

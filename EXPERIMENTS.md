@@ -685,3 +685,15 @@ epochs and natural RNG. Training selects only by each fold's validation set.
 `scripts/eval_fullmodel_grouped_cv5_all.sh` is run only after all ten best
 checkpoints exist, and evaluates every fold on both its own validation split
 and the unchanged official test split.
+
+## Full Model backbone weight-sharing ablation
+
+This is a structural ablation, not an additional proposed module.  The shared
+Full Model uses one ImageNet-pretrained Swin-T encoder for both Query and
+Satellite inputs.  The `--trogeo_unshared_backbone` setting is restricted to
+the Swin-T Full Model (`h2_ind_amhcsfi_res_bi + HiSym-CRGPE`) and replaces that
+one encoder with independent ImageNet-pretrained Query and Satellite encoders.
+All Bi-Guidance, AMHCSFI-Res, position encoding, dual heads, losses, decoder,
+official splits, and training settings remain unchanged.  It uses ordinary
+`--standard_rng --seed 2024`; no RNG state alignment or initialization
+matching is applied.
