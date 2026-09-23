@@ -7,7 +7,7 @@ import torch
 from model.TROGeo_ms_detection_ablation import TROGeoMSDetectionAblation
 
 
-def build(unshared_backbone):
+def build(unshared_backbone, gaussian_sigma_x=None, crgpe_outer_sigma_x=None):
     return TROGeoMSDetectionAblation(
         emb_size=768,
         backbone='swin_t',
@@ -16,14 +16,29 @@ def build(unshared_backbone):
         dadpe_mode='none',
         amr_pe_mode='none',
         gaussian_sigma=25.0,
+        gaussian_sigma_x=gaussian_sigma_x,
         crgpe_outer_sigma=50.0,
+        crgpe_outer_sigma_x=crgpe_outer_sigma_x,
         unshared_backbone=unshared_backbone,
     )
 
 
+def run_forward(model, device, query_hw):
+    height, width = query_hw
+    model = model.to(device).eval()
+    with torch.no_grad():
+        query = torch.zeros(1, 3, height, width, device=device)
+        reference = torch.zeros(1, 3, 1024, 1024, device=device)
+        click_map = torch.zeros(1, height, width, device=device)
+        predictions, _ = model(query, reference, click_map)
+    assert tuple(predictions['stage3'].shape) == (1, 45, 64, 64)
+    assert tuple(predictions['stage4'].shape) == (1, 45, 64, 64)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--forward', action='store_true', help='run a batch-one 1024px inference check')
+    parser.add_argument('--forward', action='store_true',
+                        help='run batch-one forward checks using real Drone and SVI query sizes')
     parser.add_argument('--device', default='cuda:0' if torch.cuda.is_available() else 'cpu')
     args = parser.parse_args()
 
@@ -51,14 +66,14 @@ def main():
 
     if args.forward:
         device = torch.device(args.device)
-        model = model.to(device).eval()
-        with torch.no_grad():
-            query = torch.zeros(1, 3, 1024, 1024, device=device)
-            reference = torch.zeros(1, 3, 1024, 1024, device=device)
-            click_map = torch.zeros(1, 1024, 1024, device=device)
-            predictions, _ = model(query, reference, click_map)
-        assert tuple(predictions['stage3'].shape) == (1, 45, 64, 64)
-        assert tuple(predictions['stage4'].shape) == (1, 45, 64, 64)
+        run_forward(model, device, (256, 256))
+        del model
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+
+        svi_model = build(unshared_backbone=True, gaussian_sigma_x=50.0,
+                          crgpe_outer_sigma_x=100.0)
+        run_forward(svi_model, device, (256, 512))
 
     print('Full Model unshared Swin-T structural{} check passed.'.format(' and forward' if args.forward else ''))
 
