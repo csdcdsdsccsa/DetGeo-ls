@@ -1616,6 +1616,7 @@ def train_epoch(train_loader, model, optimizer, epoch, args):
         loss_rccd = None
         rccd_diagnostics = None
         current_rccd_weight = 0.0
+        loss_aux = None
         qcc_losses = None
         if is_ms_detection_variant(args):
             if args.trogeo_ms_det_variant in ('h2_ind_amhcsfi_res_bi_qcc_b',
