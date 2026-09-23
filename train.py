@@ -363,7 +363,7 @@ def main():
         parser.error('--trogeo_ms_det_variant requires a supported TROGeo backbone')
     if args.trogeo_backbone in ('vit_t', 'vit_s') and args.trogeo_ms_det_variant != 'h2_ind':
         parser.error('ViT backbones are restricted to the strict two-scale E4 h2_ind experiment')
-    if args.trogeo_backbone in ('swin_s', 'swin_b', 'swin_b_native'):
+    if trogeo_mode and args.trogeo_backbone in ('swin_s', 'swin_b', 'swin_b_native'):
         if args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi':
             parser.error('Swin-S/Swin-B MS experiment is restricted to Full Model h2_ind_amhcsfi_res_bi')
         if args.trogeo_position_mode != 'hisym_crgpe' or args.trogeo_click_map_mode != 'gaussian':
