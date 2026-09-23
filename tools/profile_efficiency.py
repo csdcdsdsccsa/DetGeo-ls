@@ -199,7 +199,7 @@ def format_ops(ops):
 
 def write_outputs(rows, metadata, output_csv, output_md):
     os.makedirs(os.path.dirname(output_csv) or '.', exist_ok=True)
-    fieldnames = ('Dataset', 'Method', 'Checkpoint', 'Params_M', 'FLOPs_G', 'FPS_mean',
+    fieldnames = ('Dataset', 'Method', 'Weight_Mode', 'Checkpoint', 'Params_M', 'FLOPs_G', 'FPS_mean',
                   'FPS_std', 'Latency_ms_mean', 'Latency_ms_std', 'Query_shape',
                   'Satellite_shape', 'Batch', 'Precision', 'Unsupported_ops', 'Uncalled_modules')
     with open(output_csv, 'w', newline='', encoding='utf-8') as handle:
@@ -222,9 +222,43 @@ def write_outputs(rows, metadata, output_csv, output_md):
         handle.write('\n## Per-model tracing details\n\n')
         for row in rows:
             handle.write('### {} — {}\n\n'.format(row['Dataset'], row['Method']))
+            handle.write('- weight_mode: {}\n'.format(row['Weight_Mode']))
             handle.write('- checkpoint: `{}`\n'.format(row['Checkpoint']))
             handle.write('- unsupported_ops: {}\n'.format(row['Unsupported_ops']))
             handle.write('- uncalled_modules: {}\n\n'.format(row['Uncalled_modules']))
+
+
+def compare_checkpoint_effect(no_checkpoint_rows, loaded_csv, output_md):
+    """Compare architecture-derived metrics while allowing timing variation."""
+    with open(loaded_csv, newline='', encoding='utf-8') as handle:
+        loaded_rows = {(row['Dataset'], row['Method']): row for row in csv.DictReader(handle)}
+    lines = [
+        '# Task-checkpoint effect on efficiency', '',
+        '| Dataset | Method | Params loaded / init-only (M) | FLOPs loaded / init-only (G) | '
+        'FPS loaded / init-only | Latency loaded / init-only (ms) |',
+        '|---|---|---:|---:|---:|---:|',
+    ]
+    for row in no_checkpoint_rows:
+        key = (row['Dataset'], row['Method'])
+        if key not in loaded_rows:
+            raise RuntimeError('missing trained-checkpoint comparison row: {}'.format(key))
+        loaded = loaded_rows[key]
+        for metric in ('Params_M', 'FLOPs_G'):
+            loaded_value, init_value = float(loaded[metric]), float(row[metric])
+            if not math.isclose(loaded_value, init_value, rel_tol=1e-6, abs_tol=1e-9):
+                raise RuntimeError('{} differs between checkpoint modes for {}: {} vs {}'.format(
+                    metric, key, loaded_value, init_value))
+        lines.append('| {dataset} | {method} | {p0:.2f} / {p1:.2f} | {f0:.2f} / {f1:.2f} | '
+                     '{fps0:.2f} / {fps1:.2f} | {lat0:.2f} / {lat1:.2f} |'.format(
+                         dataset=row['Dataset'], method=row['Method'],
+                         p0=float(loaded['Params_M']), p1=row['Params_M'],
+                         f0=float(loaded['FLOPs_G']), f1=row['FLOPs_G'],
+                         fps0=float(loaded['FPS_mean']), fps1=row['FPS_mean'],
+                         lat0=float(loaded['Latency_ms_mean']), lat1=row['Latency_ms_mean']))
+    lines.extend(('', 'Params and FLOPs are asserted equal. FPS and latency are reported only as '
+                  'wall-clock observations and are not equality-asserted.'))
+    with open(output_md, 'w', encoding='utf-8') as handle:
+        handle.write('\n'.join(lines) + '\n')
 
 
 def main():
@@ -235,6 +269,9 @@ def main():
     parser.add_argument('--repeats', type=int, default=5)
     parser.add_argument('--output_csv', default='results/efficiency_fullmodel_vs_detgeo.csv')
     parser.add_argument('--output_md', default='results/efficiency_fullmodel_vs_detgeo.md')
+    parser.add_argument('--no_task_checkpoint', action='store_true',
+                        help='profile initialized models without loading trained task checkpoints')
+    parser.add_argument('--comparison_md', default='results/efficiency_checkpoint_effect_comparison.md')
     args = parser.parse_args()
     if args.warmup < 0 or args.iterations <= 0 or args.repeats <= 0:
         raise ValueError('warmup must be non-negative; iterations and repeats must be positive')
@@ -249,9 +286,10 @@ def main():
     torch.backends.cudnn.allow_tf32 = False
     torch.backends.cudnn.benchmark = True
     device = torch.device(args.device)
-    for case in CASES:
-        if not os.path.isfile(case['checkpoint']):
-            raise FileNotFoundError(case['checkpoint'])
+    if not args.no_task_checkpoint:
+        for case in CASES:
+            if not os.path.isfile(case['checkpoint']):
+                raise FileNotFoundError(case['checkpoint'])
     if not os.path.isfile('saved_models/yolov3.weights'):
         raise FileNotFoundError('saved_models/yolov3.weights')
     print('[PASS] all four checkpoints exist')
@@ -263,7 +301,11 @@ def main():
         print('\n=== {} / {} ==='.format(case['dataset'], case['method']), flush=True)
         model = build_detgeo() if case['kind'] == 'detgeo' else build_full_model(case)
         assert not isinstance(model, nn.DataParallel)
-        load_checkpoint_strict(model, case['checkpoint'])
+        if args.no_task_checkpoint:
+            print('[PASS] no trained task checkpoint loaded: {} / {}'.format(
+                case['dataset'], case['method']), flush=True)
+        else:
+            load_checkpoint_strict(model, case['checkpoint'])
         model = model.to(device).eval()
         query, satellite = make_images(case['query_hw'], device)
         if case['kind'] == 'detgeo':
@@ -289,7 +331,10 @@ def main():
         params = sum(parameter.numel() for parameter in model.parameters())
         parameter_counts[case['kind']].append(params)
         row = {
-            'Dataset': case['dataset'], 'Method': case['method'], 'Checkpoint': case['checkpoint'],
+            'Dataset': case['dataset'], 'Method': case['method'],
+            'Weight_Mode': ('Initialization only / no task checkpoint' if args.no_task_checkpoint
+                            else 'Trained validation-best checkpoint'),
+            'Checkpoint': 'NOT_LOADED' if args.no_task_checkpoint else case['checkpoint'],
             'Params_M': params / 1e6, 'FLOPs_G': flops / 1e9,
             'FPS_mean': speed['fps_mean'], 'FPS_std': speed['fps_std'],
             'Latency_ms_mean': speed['latency_ms_mean'], 'Latency_ms_std': speed['latency_ms_std'],
@@ -317,8 +362,17 @@ def main():
         ('batch_size', 1), ('precision', 'FP32'), ('TF32', False),
         ('warmup', args.warmup), ('iterations', args.iterations), ('repeats', args.repeats),
         ('FLOPs convention', 'fvcore; 1 MAC = 1 FLOP'),
+        ('task checkpoint', 'not loaded' if args.no_task_checkpoint else 'validation-best checkpoint loaded'),
+        ('initialization note', ('No trained CVOGL task checkpoint is loaded. Constructor-level pretrained '
+                                 'initialization is retained: DetGeo uses ImageNet ResNet18 and YOLOv3 weights; '
+                                 'Full Model uses ImageNet-pretrained Swin-T.' if args.no_task_checkpoint
+                                else 'Models use their trained validation-best task checkpoints.')),
     ))
     write_outputs(rows, metadata, args.output_csv, args.output_md)
+    loaded_csv = 'results/efficiency_fullmodel_vs_detgeo.csv'
+    if args.no_task_checkpoint and os.path.isfile(loaded_csv):
+        compare_checkpoint_effect(rows, loaded_csv, args.comparison_md)
+        print('[PASS] wrote {}'.format(args.comparison_md))
     print('[PASS] wrote {} and {}'.format(args.output_csv, args.output_md))
 
 
