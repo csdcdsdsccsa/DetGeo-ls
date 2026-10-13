@@ -628,7 +628,8 @@ class TROGeoMSDetectionAblation(nn.Module):
 
     def __init__(self, emb_size=768, backbone='swin_t', variant='correct63', position_mode='current', dadpe_mode='none',
                  amr_pe_mode='none', gaussian_sigma=25.0,
-                 enable_hqs=False, enable_hqs_v2a=False, enable_hqs_v2b=False, enable_acr=False):
+                 enable_hqs=False, enable_hqs_v2a=False, enable_hqs_v2b=False, enable_acr=False,
+                 guidance_mode='bi', cross_scale_module='amhcsfi_res'):
         super().__init__()
         if (emb_size != 768 or backbone not in ('swin_t', 'vit_t', 'vit_s') or variant not in self.VALID_VARIANTS
                 or position_mode not in ('current', 'detgeo', 'dg', 'ddg', 'rdg', 'hisym_pe', 'dgrpe',
@@ -655,7 +656,16 @@ class TROGeoMSDetectionAblation(nn.Module):
             raise ValueError('HiSym-PE/DGRPE requires Bi-Res, Swin-T, dadpe=none, and amr=none')
         if position_mode in ('dgrpe', 'dgrpe_v2', 'hisym_agpe', 'hisym_crgpe') and gaussian_sigma <= 0:
             raise ValueError('DGRPE/Adaptive HiSym-GPE requires positive Gaussian sigma')
+        if guidance_mode not in ('bi', 'direct', 'coarse', 'fine'):
+            raise ValueError('invalid guidance_mode')
+        if cross_scale_module not in ('amhcsfi_res', 'csfi'):
+            raise ValueError('invalid cross_scale_module')
+        if (guidance_mode != 'bi' or cross_scale_module != 'amhcsfi_res') and (
+                variant != 'h2_ind_amhcsfi_res_bi' or backbone != 'swin_t' or position_mode != 'hisym_crgpe'):
+            raise ValueError('mechanism ablations require Swin-T Full Model with HiSym-CRGPE')
         self.variant = variant
+        self.guidance_mode = guidance_mode
+        self.cross_scale_module = cross_scale_module
         self.position_mode = position_mode
         self.backbone_name = backbone
         self.dadpe_mode = dadpe_mode
@@ -823,12 +833,15 @@ class TROGeoMSDetectionAblation(nn.Module):
                 adaptive=self.variant == 'h2_ind_amhcsfi_bi')
         # NoCSFI variants are standalone natural-RNG models: they neither
         # construct CSFI nor synthesize its RNG consumption.
-        if self.variant in self.COARSE_GUIDE_VARIANTS:
+        if self.variant in self.COARSE_GUIDE_VARIANTS and (self.variant != 'h2_ind_amhcsfi_res_bi'
+                                                           or self.guidance_mode in ('bi', 'coarse')):
             self.coarse_guidance = CoarseGuidance()
-        if self.variant in self.FINE_GUIDE_VARIANTS:
+        if self.variant in self.FINE_GUIDE_VARIANTS and (self.variant != 'h2_ind_amhcsfi_res_bi'
+                                                         or self.guidance_mode in ('bi', 'fine')):
             self.fine_guidance = FineGuidance()
         # Must be after every corresponding ordinary-CSFI public module.
-        if self.variant in self.AMHCSFI_RES_VARIANTS:
+        if self.variant in self.AMHCSFI_RES_VARIANTS and (self.variant != 'h2_ind_amhcsfi_res_bi'
+                                                          or self.cross_scale_module == 'amhcsfi_res'):
             self.amhcsfi_res_refiner = ResidualAdaptiveMultiReceptiveCSFI()
         if self.variant in self.QCC_VARIANTS:
             # Every QCC variant has the identical parameter layout.  QCC-A
@@ -1069,6 +1082,17 @@ class TROGeoMSDetectionAblation(nn.Module):
         if self.variant in self.AFUSE_B0_VARIANTS:
             z3, corr_gate3 = parameter_free_cosine_correlation(q3, r3)
             z4, corr_gate4 = parameter_free_cosine_correlation(q4, r4)
+        elif self.variant == 'h2_ind_amhcsfi_res_bi' and self.guidance_mode == 'direct':
+            z3 = self.cvopm_stage3(r3, context=self._to_tokens(q3))
+            z4 = self.cvopm_stage4(r4, context=self._to_tokens(q4))
+        elif self.variant == 'h2_ind_amhcsfi_res_bi' and self.guidance_mode == 'fine':
+            z3 = self.cvopm_stage3(r3, context=self._to_tokens(q3))
+            r4_guided, fine_logits, fine_down = self.fine_guidance(z3, r4)
+            z4 = self.cvopm_stage4(r4_guided, context=self._to_tokens(q4))
+        elif self.variant == 'h2_ind_amhcsfi_res_bi' and self.guidance_mode == 'coarse':
+            z4 = self.cvopm_stage4(r4, context=self._to_tokens(q4))
+            r3_guided, coarse_logits, coarse_up = self.coarse_guidance(z4, r3)
+            z3 = self.cvopm_stage3(r3_guided, context=self._to_tokens(q3))
         elif self.variant in self.BIDIR_GUIDE_VARIANTS:
             # Reuse the same CA4 parameters for both passes: first to derive
             # the coarse Stage4 prior, then to refine the final Stage4 map.
@@ -1125,6 +1149,8 @@ class TROGeoMSDetectionAblation(nn.Module):
                 z3, z4, self.cross_scale_interaction)
         elif self.variant in self.MHCSFI_VARIANTS:
             z3, z4, mhcsfi_diagnostics = self.mh_cross_scale_interaction(z3, z4)
+        elif self.variant == 'h2_ind_amhcsfi_res_bi' and self.cross_scale_module == 'csfi':
+            z3, z4, csfi_gate3, csfi_gate4 = self.cross_scale_interaction(z3, z4)
         elif self.variant in self.AMHCSFI_RES_VARIANTS:
             z3, z4, amhcsfi_res_diagnostics = self.amhcsfi_res_refiner(z3, z4, self.cross_scale_interaction)
             csfi_gate3, csfi_gate4 = amhcsfi_res_diagnostics['gate3'], amhcsfi_res_diagnostics['gate4']
@@ -1363,7 +1389,7 @@ class TROGeoMSDetectionAblation(nn.Module):
                               d['mask3'].mean().item(), d['mask4'].mean().item(),
                               self.mh_cross_scale_interaction.alpha3.item(), self.mh_cross_scale_interaction.alpha4.item(),
                               w3[0].item(), w3[1].item(), w3[2].item(), w4[0].item(), w4[1].item(), w4[2].item()), flush=True)
-                if self.variant in self.AMHCSFI_RES_VARIANTS:
+                if self.variant in self.AMHCSFI_RES_VARIANTS and hasattr(self, 'amhcsfi_res_refiner'):
                     d = amhcsfi_res_diagnostics
                     w3, w4 = d['weights3'].mean(0), d['weights4'].mean(0)
                     print('[E4-AMHCSFI-RES sanity] alpha3={:.6f} alpha4={:.6f} beta3={:.6f} beta4={:.6f} '
@@ -1376,11 +1402,11 @@ class TROGeoMSDetectionAblation(nn.Module):
                     mean_weights = fusion_weights.mean(dim=0)
                     print('[E4-FG-AMHCSFI-AFuse sanity] w3={:.6f} w4={:.6f} sum={:.6f}'.format(
                         mean_weights[0].item(), mean_weights[1].item(), mean_weights.sum().item()), flush=True)
-                if self.variant in self.COARSE_GUIDE_VARIANTS:
+                if coarse_logits is not None and self.variant in self.COARSE_GUIDE_VARIANTS:
                     print('[E4-CG sanity] coarse={} coarse_up={} gamma={:.6f} hierarchical={}'.format(
                         tuple(coarse_logits.shape), tuple(coarse_up.shape), self.coarse_guidance.gamma.item(),
                         self.variant in self.HIER_VARIANTS), flush=True)
-                if self.variant in self.FINE_GUIDE_VARIANTS:
+                if fine_logits is not None and self.variant in self.FINE_GUIDE_VARIANTS:
                     print('[E4-FG sanity] fine={} fine_down={} gamma={:.6f} bidirectional={}'.format(
                         tuple(fine_logits.shape), tuple(fine_down.shape), self.fine_guidance.gamma.item(),
                         self.variant in self.BIDIR_GUIDE_VARIANTS), flush=True)

@@ -171,6 +171,10 @@ def main():
                         default='none', help='controlled Swin-T multi-scale detection ablation')
     parser.add_argument('--coarse_loss_weight', default=0.2, type=float,
                         help='weight of coarse Stage4 heatmap supervision for E4 collaboration variants')
+    parser.add_argument('--guidance_mode', choices=('bi', 'direct', 'coarse', 'fine'), default='bi',
+                        help='Full Model mechanism ablation; default retains original Bi-Guidance')
+    parser.add_argument('--cross_scale_module', choices=('amhcsfi_res', 'csfi'), default='amhcsfi_res',
+                        help='Full Model mechanism ablation; default retains original AMHCSFI-Res')
     parser.add_argument('--coarse_sigma', default=1.5, type=float,
                         help='Gaussian sigma in cells for E4 Stage4 coarse heatmap supervision')
     parser.add_argument('--fine_sigma', default=3.0, type=float,
@@ -303,6 +307,13 @@ def main():
         parser.error('--hisym_pae supports only original P0 or --sam_refined_pe')
     if args.standard_rng and args.original_rng_matched:
         parser.error('--standard_rng and --original_rng_matched are mutually exclusive')
+    if (args.guidance_mode != 'bi' or args.cross_scale_module != 'amhcsfi_res') and (
+            args.trogeo_ms_det_variant != 'h2_ind_amhcsfi_res_bi'
+            or args.trogeo_backbone != 'swin_t'
+            or args.trogeo_position_mode != 'hisym_crgpe'
+            or args.trogeo_click_map_mode != 'gaussian'
+            or args.dadpe_mode != 'none' or args.amr_pe_mode != 'none'):
+        parser.error('mechanism ablations require the original Swin-T HiSym-CRGPE Full Model')
     if args.hisym_pae_inline_init and (args.hisym_pae or args.sam_refined_pe or args.rgbp_interaction
                                        or args.sam_prompt or args.gaussian_only or args.adaptive_sam_prompt):
         parser.error('--hisym_pae_inline_init is a standalone P0+PAE confirmation experiment')
@@ -644,7 +655,9 @@ def main():
                                            gaussian_sigma=args.gaussian_sigma,
                                            enable_hqs=args.hqs_v1,
                                            enable_hqs_v2a=args.hqs_v2a, enable_hqs_v2b=args.hqs_v2b,
-                                           enable_acr=args.acr_head)
+                                           enable_acr=args.acr_head,
+                                           guidance_mode=args.guidance_mode,
+                                           cross_scale_module=args.cross_scale_module)
     elif args.backbone_exp != 'baseline':
         model = DetGeoBackboneAblation(emb_size=args.emb_size, leaky=True, backbone_exp=args.backbone_exp)
     elif args.single_scale_ca:
@@ -1064,11 +1077,21 @@ def _ms_predictions_and_loss(predictions, ori_gt_bbox, anchors_full, args, inclu
                                                args.img_size, args.fine_sigma)
             elif variant in ('h2_ind_csfi_bi', 'h2_ind_bi_nocsfi', 'h2_ind_mhcsfi_bi', 'h2_ind_amhcsfi_bi',
                              'h2_ind_amhcsfi_res_bi'):
-                loss_coarse = coarse_heatmap_loss(predictions['coarse_logits'], ori_gt_bbox,
-                                                  args.img_size, args.coarse_sigma)
-                loss_fine = coarse_heatmap_loss(predictions['fine_logits'], ori_gt_bbox,
-                                                args.img_size, args.fine_sigma)
-                loss_aux = 0.5 * (loss_coarse + loss_fine)
+                if variant == 'h2_ind_amhcsfi_res_bi' and args.guidance_mode != 'bi':
+                    # Keep each surviving term's original 0.5 coefficient.
+                    # Detection losses and the outer auxiliary weight are unchanged.
+                    if args.guidance_mode == 'coarse':
+                        loss_aux = 0.5 * coarse_heatmap_loss(predictions['coarse_logits'], ori_gt_bbox,
+                                                              args.img_size, args.coarse_sigma)
+                    elif args.guidance_mode == 'fine':
+                        loss_aux = 0.5 * coarse_heatmap_loss(predictions['fine_logits'], ori_gt_bbox,
+                                                              args.img_size, args.fine_sigma)
+                else:
+                    loss_coarse = coarse_heatmap_loss(predictions['coarse_logits'], ori_gt_bbox,
+                                                      args.img_size, args.coarse_sigma)
+                    loss_fine = coarse_heatmap_loss(predictions['fine_logits'], ori_gt_bbox,
+                                                    args.img_size, args.fine_sigma)
+                    loss_aux = 0.5 * (loss_coarse + loss_fine)
             elif variant in coarse_variants:
                 loss_aux = coarse_heatmap_loss(predictions['coarse_logits'], ori_gt_bbox,
                                                args.img_size, args.coarse_sigma)
